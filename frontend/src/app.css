@@ -283,3 +283,19 @@ html, body {
 .m3-search[hidden] + .m3-ghost {
     margin-left: auto;
 }
+
+.m3-sort {
+    order: 2;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+}
+
+.m3-sort:hover {
+    color: var(--fg);
+}

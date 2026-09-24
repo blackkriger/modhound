@@ -84,6 +84,8 @@ const state = {
     install: new Map<string, InstallState>(),
     report: null as main.Report | null,
     error: '',
+    doneAt: new Map<string, string>(),
+    sort: {updates: 'name', updated: 'date', 'need you': 'name'} as Record<string, 'name' | 'date'>,
 };
 
 document.querySelector('#app')!.innerHTML = `
@@ -127,6 +129,37 @@ document.querySelector('#app')!.innerHTML = `
 </div>`;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+
+function morph(from: Node, to: Node) {
+    if (from.nodeType !== to.nodeType || from.nodeName !== to.nodeName) {
+        from.parentNode!.replaceChild(to, from);
+        return;
+    }
+    if (!(from instanceof Element) || !(to instanceof Element)) {
+        if (from.nodeValue !== to.nodeValue) from.nodeValue = to.nodeValue;
+        return;
+    }
+    for (const {name} of Array.from(from.attributes)) if (!to.hasAttribute(name)) from.removeAttribute(name);
+    for (const {name, value} of Array.from(to.attributes)) if (from.getAttribute(name) !== value) from.setAttribute(name, value);
+    if (from instanceof HTMLInputElement && to instanceof HTMLInputElement) {
+        if (from.checked !== to.checked) from.checked = to.checked;
+        if (document.activeElement !== from && from.value !== to.value) from.value = to.value;
+    }
+    morphChildren(from, to);
+}
+
+function morphChildren(from: Element, to: Element) {
+    const old = Array.from(from.childNodes);
+    const next = Array.from(to.childNodes);
+    next.forEach((n, i) => (i < old.length ? morph(old[i], n) : from.appendChild(n)));
+    for (let i = next.length; i < old.length; i++) from.removeChild(old[i]);
+}
+
+function patch(el: HTMLElement, html: string) {
+    const next = document.createElement(el.tagName);
+    next.innerHTML = html;
+    morphChildren(el, next);
+}
 
 function esc(s: unknown): string {
     return String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]!));
@@ -203,6 +236,22 @@ function releaseDate(d: string): string {
     return m ? `released ${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}` : '';
 }
 
+function updatedTime(m: resolve.Mod): string {
+    return state.doneAt.get(m.id) ?? undoItem(m.key, installedFile(m))?.time ?? '';
+}
+
+function nowStamp(): string {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function sortRows(label: string, rows: Row[]): Row[] {
+    if (state.sort[label] !== 'date') return rows;
+    const key = (m: resolve.Mod) => (label === 'updated' ? updatedTime(m) : m.target?.date ?? '');
+    return [...rows].sort((a, b) => key(b.m).localeCompare(key(a.m)));
+}
+
 function updatedAt(t: string): string {
     const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2})/.exec(t);
     return m ? `updated ${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}, ${m[4]}` : '';
@@ -235,9 +284,9 @@ function rowHTML({m, as}: Row): string {
     } else if (st === 'failed') {
         const err = inst?.error || state.report?.failed?.find(f => f.id === m.id)?.error || '';
         note = `<span class="m3-note m3-note--bad">${esc(shortError(err, m.source))}</span>`;
-    } else if (st === 'done' && state.mode !== 'installing') {
+    } else if (st === 'done') {
         const warning = state.mode === 'report' ? state.report?.installed?.find(f => f.id === m.id)?.warning : '';
-        const when = updatedAt(undoItem(m.key, installedFile(m))?.time ?? '');
+        const when = updatedAt(updatedTime(m));
         if (warning) note = `<span class="m3-note m3-note--bad">${esc(warning)}</span>`;
         else if (when) note = `<span class="m3-note">${esc(when)}</span>`;
     } else if (st === 'queued') {
@@ -343,20 +392,21 @@ function renderChanges() {
 
     let html = '';
     for (const [label, rows] of sections) {
-        const visible = rows.filter(r => matchesQuery(r.m));
+        const visible = sortRows(label, rows.filter(r => matchesQuery(r.m)));
         if (!visible.length) continue;
         const selectable = state.mode === 'ready' && label === 'updates' && visible.some(r => kindOf(r.m) === 'up');
+        const sort = state.mode !== 'checking' && label in state.sort && visible.length > 1
+            ? `<button type="button" class="m3-sort" data-sort="${label}">by ${state.sort[label]}</button>`
+            : '';
         html += selectable
-            ? `<div class="m3-sep m3-sep--check"><span class="m3-check-slot"><input type="checkbox" class="m3-check" id="select-all" aria-label="Select all updates"></span>${label}</div>`
-            : `<div class="m3-sep">${label}</div>`;
+            ? `<div class="m3-sep m3-sep--check"><span class="m3-check-slot"><input type="checkbox" class="m3-check" id="select-all" aria-label="Select all updates"></span>${label}${sort}</div>`
+            : `<div class="m3-sep">${label}${sort}</div>`;
         html += visible.map(rowHTML).join('');
     }
     if (!html && state.mode === 'ready') html = `<div class="m3-empty">${state.q.trim() ? 'No mods match' : 'Nothing to show'}</div>`;
     if (tail) html += `<p class="m3-tail">${esc(tail)}</p>`;
-    const scroll = list.scrollTop;
-    list.innerHTML = html;
+    patch(list, html);
     syncSelectAll();
-    list.scrollTop = scroll;
 }
 
 function visibleUpdates(): resolve.Mod[] {
@@ -628,10 +678,15 @@ function inspectorHTML(): string {
     </div>`;
 }
 
+let inspView = '';
+
 function renderInspector() {
     const insp = $('insp');
     const focused = document.activeElement?.id;
-    insp.innerHTML = inspectorHTML();
+    const view = `${state.mode}|${state.selId ?? ''}|${state.settingsOpen}`;
+    if (view === inspView) patch(insp, inspectorHTML());
+    else insp.innerHTML = inspectorHTML();
+    inspView = view;
     animateCounts(insp);
     if (focused === 'cf-key' || focused === 'keybox-input' || focused === 'srv-dir') $<HTMLInputElement>(focused)?.focus();
 }
@@ -787,6 +842,7 @@ EventsOn('mod', (m: resolve.Mod) => {
 EventsOn('install', (e: { id: string; state: string; percent: number; error: string }) => {
     if (state.mode !== 'installing') return;
     state.install.set(e.id, {state: e.state, percent: e.percent, error: e.error});
+    if (e.state === 'done') state.doneAt.set(e.id, nowStamp());
     scheduleRender();
 });
 
@@ -801,6 +857,7 @@ async function runCheck() {
     state.selId = null;
     state.settingsOpen = false;
     state.recheck = false;
+    state.doneAt = new Map();
     state.mods = new Map();
     state.notes = new Map();
     modsChanged();
@@ -1163,6 +1220,12 @@ $('primary').addEventListener('click', () => {
 
 $('list').addEventListener('click', e => {
     const el = e.target as HTMLElement;
+    const sort = el.closest<HTMLElement>('[data-sort]')?.dataset.sort;
+    if (sort) {
+        state.sort[sort] = state.sort[sort] === 'date' ? 'name' : 'date';
+        renderChanges();
+        return;
+    }
     if (el.id === 'select-all') {
         const mods = visibleUpdates();
         const all = mods.every(m => !state.unchecked.has(m.id));
