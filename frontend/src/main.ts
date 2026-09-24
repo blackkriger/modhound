@@ -1,7 +1,7 @@
 import './modhound.css';
 import './app.css';
 
-import {ApplyAppUpdate, Changelog, Check, CheckAppUpdate, ChoosePack, ChooseServer, DefaultPack, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSkipped, Settings, Stop, SyncServer, Undo, Update} from '../wailsjs/go/main/App';
+import {ApplyAppUpdate, Changelog, Check, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, DefaultPack, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update} from '../wailsjs/go/main/App';
 import {main, resolve} from '../wailsjs/go/models';
 import {ClipboardSetText, EventsOn, Quit, WindowMinimise} from '../wailsjs/runtime/runtime';
 
@@ -58,6 +58,7 @@ const state = {
     draftTheme: '',
     draftDebug: false,
     draftServer: '',
+    draftServerKey: '',
     serverBehind: 0,
     syncing: false,
     serverEnter: false,
@@ -85,7 +86,7 @@ const state = {
     report: null as main.Report | null,
     error: '',
     doneAt: new Map<string, string>(),
-    sort: {updates: 'name', updated: 'date', 'need you': 'name'} as Record<string, 'name' | 'date'>,
+    sort: {updates: 'date', updated: 'date', 'need you': 'date'} as Record<string, 'name' | 'date'>,
 };
 
 document.querySelector('#app')!.innerHTML = `
@@ -531,11 +532,19 @@ function inspectorHTML(): string {
                 </div>
             </div>
             <div class="m3-field">
-                <label class="m3-label" for="srv-dir">Server folder</label>
+                <label class="m3-label" for="srv-dir">Server</label>
                 <div class="m3-input">
-                    <input id="srv-dir" type="text" value="${esc(state.draftServer)}" placeholder="Not set" spellcheck="false" autocomplete="off">
+                    <input id="srv-dir" type="text" value="${esc(state.draftServer)}" placeholder="Folder or user@host:/path" spellcheck="false" autocomplete="off">
                     <button type="button" id="srv-browse" aria-label="Choose the server folder">${icon.folder}</button>
                 </div>
+            </div>
+            <div class="m3-field${isRemote(state.draftServer) ? '' : ' is-off'}">
+                <label class="m3-label" for="srv-key">SSH key</label>
+                <div class="m3-input">
+                    <input id="srv-key" type="text" value="${esc(state.draftServerKey)}" placeholder="Not set" spellcheck="false" autocomplete="off"${isRemote(state.draftServer) ? '' : ' disabled'}>
+                    <button type="button" id="key-browse" aria-label="Choose the SSH key"${isRemote(state.draftServer) ? '' : ' disabled'}>${icon.folder}</button>
+                </div>
+                ${isRemote(state.draftServer) ? '' : `<p class="m3-hint">${state.draftServerKey ? 'Enter a remote server address in the server field to use this SSH key for it or select another one' : 'Enter a remote server address in the server field to select your SSH key for it'}</p>`}
             </div>
             <fieldset class="m3-field">
                 <legend class="m3-label">Theme</legend>
@@ -639,6 +648,7 @@ function inspectorHTML(): string {
                 ...serverLines(r.server),
             ])}
             ${r.server?.error ? `<p class="m3-reason m3-bad">${esc(r.server.error)}</p>` : ''}
+            ${r.server?.remote && r.server.results?.some(x => x.ok) ? '<p class="m3-reason">Restart the server to load the updated mods.</p>' : ''}
             ${n || f ? `<ul class="m3-steps">${[
                 ...(r.failed ?? []).map(x => `<li><span class="g m3-bad">✕</span><span class="t">${esc(x.name)}</span><span class="n m3-bad">failed</span></li>`),
                 ...[...(r.installed ?? [])].reverse().map(x => `<li><span class="g is-ok">✓</span><span class="t">${esc(x.name)}</span><span class="n">${esc(x.to)}</span></li>`),
@@ -956,6 +966,11 @@ function undoItem(key: string, file: string) {
     return state.lastUpdate?.restorable?.find(it => it.key === key && it.newFile === file);
 }
 
+function isRemote(s: string): boolean {
+    s = s.trim();
+    return s.startsWith('sftp://') || /^[^@\s/\\]+@[^:\s/\\]+:/.test(s);
+}
+
 function busyOps(): boolean {
     return state.installing > 0 || state.undoActive.length > 0;
 }
@@ -1018,7 +1033,7 @@ async function runSync() {
         const ok = (r.results ?? []).filter(x => x.ok).length;
         const failed = (r.results ?? []).filter(x => !x.ok);
         if (r.error) state.error = r.error;
-        else state.notice = `synced ${ok} ${plural(ok, 'mod', 'mods')} to the server${failed.length ? `, ${failed.length} failed: ${failed.map(f => `${f.name} (${f.error})`).join(', ')}` : ''}`;
+        else state.notice = `synced ${ok} ${plural(ok, 'mod', 'mods')} to the server${r.remote && ok ? ', restart it to load them' : ''}${failed.length ? `, ${failed.length} failed: ${failed.map(f => `${f.name} (${f.error})`).join(', ')}` : ''}`;
     } catch (e) {
         state.error = String(e);
     }
@@ -1101,6 +1116,7 @@ function openSettings(open: boolean) {
         state.draftTheme = state.settings.theme;
         state.draftDebug = state.settings.debug;
         state.draftServer = state.settings.server;
+        state.draftServerKey = state.settings.serverKey;
         state.showKey = false;
     }
     applyTheme();
@@ -1113,10 +1129,10 @@ function applyTheme() {
     else delete $('root').dataset.theme;
 }
 
-async function saveSettings(key: string, theme: string, debug: boolean, server: string) {
+async function saveSettings(key: string, theme: string, debug: boolean, server: string, serverKey: string) {
     const before = state.settings;
     try {
-        await SaveSettings(key, theme, debug, server);
+        await SaveSettings(key, theme, debug, server, serverKey);
         state.settings = await Settings();
     } catch (e) {
         state.error = String(e);
@@ -1133,11 +1149,11 @@ async function saveSettings(key: string, theme: string, debug: boolean, server: 
         render();
         if (changed && state.root) runCheck();
     }
-    if (before?.server !== state.settings.server) refreshServer();
+    if (before?.server !== state.settings.server || before?.serverKey !== state.settings.serverKey) refreshServer();
 }
 
 function autosave() {
-    saveSettings(state.draftKey, state.draftTheme, state.draftDebug, state.draftServer);
+    saveSettings(state.draftKey, state.draftTheme, state.draftDebug, state.draftServer, state.draftServerKey);
 }
 
 async function toggleSkip(m: resolve.Mod) {
@@ -1225,6 +1241,7 @@ $('list').addEventListener('click', e => {
     const sort = el.closest<HTMLElement>('[data-sort]')?.dataset.sort;
     if (sort) {
         state.sort[sort] = state.sort[sort] === 'date' ? 'name' : 'date';
+        SetSort(sort, state.sort[sort]).catch(() => {});
         renderChanges();
         return;
     }
@@ -1322,6 +1339,17 @@ $('insp').addEventListener('click', e => {
         case 'app-update':
             applyAppUpdate();
             break;
+        case 'key-browse':
+            ChooseKey().then(file => {
+                if (!file) return;
+                state.draftServerKey = file;
+                renderInspector();
+                autosave();
+            }).catch(err => {
+                state.error = String(err);
+                renderFoot();
+            });
+            break;
         case 'srv-browse':
             ChooseServer().then(dir => {
                 if (!dir) return;
@@ -1347,7 +1375,7 @@ $('insp').addEventListener('click', e => {
             break;
         case 'keybox-save': {
             const key = state.keyboxDraft.trim();
-            if (key) saveSettings(key, state.settings?.theme ?? '', state.settings?.debug ?? false, state.settings?.server ?? '');
+            if (key) saveSettings(key, state.settings?.theme ?? '', state.settings?.debug ?? false, state.settings?.server ?? '', state.settings?.serverKey ?? '');
             break;
         }
     }
@@ -1356,7 +1384,11 @@ $('insp').addEventListener('click', e => {
 $('insp').addEventListener('input', e => {
     const el = e.target as HTMLInputElement;
     if (el.id === 'cf-key') state.draftKey = el.value;
-    if (el.id === 'srv-dir') state.draftServer = el.value;
+    if (el.id === 'srv-dir') {
+        state.draftServer = el.value;
+        renderInspector();
+    }
+    if (el.id === 'srv-key') state.draftServerKey = el.value;
     if (el.id === 'keybox-input') state.keyboxDraft = el.value;
 });
 
@@ -1407,7 +1439,7 @@ $('insp').addEventListener('change', e => {
         state.draftDebug = el.checked;
         autosave();
     }
-    if (el.id === 'cf-key' || el.id === 'srv-dir') autosave();
+    if (el.id === 'cf-key' || el.id === 'srv-dir' || el.id === 'srv-key') autosave();
 });
 
 $('insp').addEventListener('auxclick', e => e.preventDefault());
@@ -1434,6 +1466,9 @@ window.addEventListener('unhandledrejection', e => {
         return;
     }
     state.root = state.settings.lastPack;
+    for (const [section, by] of Object.entries(state.settings.sort ?? {})) {
+        if (section in state.sort && (by === 'name' || by === 'date')) state.sort[section] = by;
+    }
     CheckAppUpdate().then(v => {
         state.appUpdate = v;
         if (state.settingsOpen) renderInspector();

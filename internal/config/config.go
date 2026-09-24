@@ -10,16 +10,18 @@ import (
 )
 
 type Pack struct {
-	Skip   []string `json:"skip"`
-	Server *string  `json:"server,omitempty"`
+	Skip      []string `json:"skip"`
+	Server    *string  `json:"server,omitempty"`
+	ServerKey string   `json:"serverKey,omitempty"`
 }
 
 type Config struct {
-	CurseForgeKey string           `json:"curseforgeKey,omitempty"`
-	Theme         string           `json:"theme,omitempty"`
-	Debug         bool             `json:"debug,omitempty"`
-	LastPack      string           `json:"lastPack,omitempty"`
-	Packs         map[string]*Pack `json:"packs"`
+	CurseForgeKey string            `json:"curseforgeKey,omitempty"`
+	Theme         string            `json:"theme,omitempty"`
+	Debug         bool              `json:"debug,omitempty"`
+	LastPack      string            `json:"lastPack,omitempty"`
+	Sort          map[string]string `json:"sort,omitempty"`
+	Packs         map[string]*Pack  `json:"packs"`
 }
 
 type Store struct {
@@ -187,6 +189,26 @@ func (s *Store) SetServer(pack, dir string) error {
 			c.Packs[pack] = p
 		}
 		p.Server = &dir
+	})
+}
+
+func (s *Store) ServerKey(pack string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.cfg.Packs[pack]; p != nil {
+		return p.ServerKey
+	}
+	return ""
+}
+
+func (s *Store) SetServerKey(pack, key string) error {
+	return s.Update(func(c *Config) {
+		p := c.Packs[pack]
+		if p == nil {
+			p = &Pack{}
+			c.Packs[pack] = p
+		}
+		p.ServerKey = key
 	})
 }
 

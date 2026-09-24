@@ -11,6 +11,7 @@ export namespace backup {
 	    to: string;
 	    restored: boolean;
 	    time?: string;
+	    remote?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Item(source);
@@ -28,6 +29,7 @@ export namespace backup {
 	        this.to = source["to"];
 	        this.restored = source["restored"];
 	        this.time = source["time"];
+	        this.remote = source["remote"];
 	    }
 	}
 	export class Result {
@@ -227,6 +229,7 @@ export namespace main {
 	}
 	export class ServerSync {
 	    root: string;
+	    remote: boolean;
 	    results: server.Result[];
 	    error: string;
 	
@@ -237,6 +240,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.root = source["root"];
+	        this.remote = source["remote"];
 	        this.results = this.convertValues(source["results"], server.Result);
 	        this.error = source["error"];
 	    }
@@ -316,6 +320,8 @@ export namespace main {
 	    debug: boolean;
 	    lastPack: string;
 	    server: string;
+	    serverKey: string;
+	    sort: Record<string, string>;
 	    version: string;
 	
 	    static createFrom(source: any = {}) {
@@ -329,6 +335,8 @@ export namespace main {
 	        this.debug = source["debug"];
 	        this.lastPack = source["lastPack"];
 	        this.server = source["server"];
+	        this.serverKey = source["serverKey"];
+	        this.sort = source["sort"];
 	        this.version = source["version"];
 	    }
 	}

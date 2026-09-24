@@ -46,12 +46,14 @@ type App struct {
 }
 
 type Settings struct {
-	CurseForgeKey string `json:"curseforgeKey"`
-	Theme         string `json:"theme"`
-	Debug         bool   `json:"debug"`
-	LastPack      string `json:"lastPack"`
-	Server        string `json:"server"`
-	Version       string `json:"version"`
+	CurseForgeKey string            `json:"curseforgeKey"`
+	Theme         string            `json:"theme"`
+	Debug         bool              `json:"debug"`
+	LastPack      string            `json:"lastPack"`
+	Server        string            `json:"server"`
+	ServerKey     string            `json:"serverKey"`
+	Sort          map[string]string `json:"sort"`
+	Version       string            `json:"version"`
 }
 
 type Progress struct {
@@ -83,6 +85,7 @@ type Report struct {
 
 type ServerSync struct {
 	Root    string          `json:"root"`
+	Remote  bool            `json:"remote"`
 	Results []server.Result `json:"results"`
 	Error   string          `json:"error"`
 }
@@ -95,6 +98,7 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	selfupdate.CleanOld()
 	migrateErr := config.Migrate()
+	server.KeyFor = func(string) string { return a.serverKey() }
 	go a.forwardLogs()
 	a.configureLog()
 	if migrateErr != nil {
@@ -170,6 +174,8 @@ func (a *App) Settings() Settings {
 		Debug:         c.Debug,
 		LastPack:      c.LastPack,
 		Server:        a.serverRoot(),
+		ServerKey:     a.serverKey(),
+		Sort:          c.Sort,
 		Version:       Version,
 	}
 }
@@ -181,6 +187,21 @@ func (a *App) serverRoot() string {
 	}
 	dir, _ := a.store.Server(pack)
 	return dir
+}
+
+func (a *App) serverKey() string {
+	if key := a.store.ServerKey(a.packRoot()); key != "" {
+		return key
+	}
+	return server.DefaultKey()
+}
+
+func (a *App) ChooseKey() (string, error) {
+	start := filepath.Dir(a.serverKey())
+	if a.serverKey() == "" {
+		start, _ = os.UserHomeDir()
+	}
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: "Select SSH key", DefaultDirectory: start})
 }
 
 func (a *App) ChooseServer() (string, error) {
@@ -198,19 +219,41 @@ func (a *App) ChooseServer() (string, error) {
 	return dir, nil
 }
 
-func (a *App) SaveSettings(key, theme string, debug bool, serverDir string) error {
+func (a *App) SaveSettings(key, theme string, debug bool, serverDir, serverKey string) error {
 	serverDir = strings.TrimSpace(serverDir)
+	serverKey = strings.TrimSpace(serverKey)
 	pack := a.packRoot()
-	if serverDir != "" {
+	keyChanged := serverKey != a.serverKey()
+	switch {
+	case serverDir == "":
+	case server.IsRemote(serverDir):
+		if serverDir != a.serverRoot() || keyChanged {
+			check := serverKey
+			if check == "" {
+				check = server.DefaultKey()
+			}
+			if err := server.CheckRemote(serverDir, check); err != nil {
+				return err
+			}
+		}
+	default:
 		if _, err := resolve.FindModsDir(serverDir); err != nil {
 			return err
 		}
 		if strings.EqualFold(filepath.Clean(serverDir), filepath.Clean(pack)) {
-			return errors.New("the server folder is the pack itself")
+			return errors.New("the server folder is the minecraft folder itself")
 		}
 	}
 	if pack != "" && serverDir != a.serverRoot() {
 		if err := a.store.SetServer(pack, serverDir); err != nil {
+			return err
+		}
+	}
+	if pack != "" && keyChanged {
+		if serverKey == server.DefaultKey() {
+			serverKey = ""
+		}
+		if err := a.store.SetServerKey(pack, serverKey); err != nil {
 			return err
 		}
 	}
@@ -226,6 +269,18 @@ func (a *App) SaveSettings(key, theme string, debug bool, serverDir string) erro
 	})
 	a.configureLog()
 	return err
+}
+
+func (a *App) SetSort(section, by string) error {
+	if by != "name" && by != "date" {
+		return fmt.Errorf("unknown sort %q", by)
+	}
+	return a.store.Update(func(c *config.Config) {
+		if c.Sort == nil {
+			c.Sort = map[string]string{}
+		}
+		c.Sort[section] = by
+	})
 }
 
 func (a *App) ChoosePack() (string, error) {
@@ -495,7 +550,7 @@ func mergeServer(prev, next *ServerSync) *ServerSync {
 	if next == nil {
 		return prev
 	}
-	merged := &ServerSync{Root: next.Root, Results: append(append([]server.Result{}, prev.Results...), next.Results...), Error: next.Error}
+	merged := &ServerSync{Root: next.Root, Remote: next.Remote, Results: append(append([]server.Result{}, prev.Results...), next.Results...), Error: next.Error}
 	if merged.Error == "" && prev.Root == next.Root {
 		merged.Error = prev.Error
 	}
@@ -619,7 +674,7 @@ func (a *App) syncServer(pack *resolve.Pack, session *backup.Session, keys map[s
 	if root == "" {
 		return nil
 	}
-	out := &ServerSync{Root: root}
+	out := &ServerSync{Root: root, Remote: server.IsRemote(root)}
 	diff, err := server.Compare(pack, root)
 	if err == nil {
 		if keys != nil {

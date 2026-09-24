@@ -2,7 +2,7 @@
 
 # modhound
 
-Finds and installs mod updates for your minecraft modpack. Made for my own modpack, which I play on legacy TL from time to time, but works for updating mods in any TL modpack. 
+Finds and installs mod updates for your Minecraft modpack. Made for my own modpack, which I play on legacy TL from time to time, but works for updating mods in any modpack, as long as it has a folder with mods in it. 
 
 modhound identifies every jar in the `mods` folder by its hash on CurseForge and Modrinth, and GT New Horizons mods by the GTNH asset manifest. It only installs files built for the modpack's Minecraft version and loader, checks each download before replacing the old jar, keeps the previous version of every mod it updates, and writes a report of what was updated. 
 
@@ -31,9 +31,14 @@ modhound keeps the previous version of each mod it updates. Updating a mod again
 
 ## Server
 
-If a server folder is set in the settings, every mod updated in the modpack is also updated in the server's `mods` folder, if the server has it. When the server is behind the modpack, the right panel shows how many mods differ and a **Sync** link. Server files are backed up and restored by **Undo** together with the modpack.
+Set **Server** in the settings to keep a server's mods in step with the modpack. Every mod updated in the modpack is then also updated in the server's mods folder, if the server has it. When the server is behind the modpack, the right panel shows how many mods differ and an option to **Sync** them. Server files are backed up and restored by **Undo** together with the modpack. 
 
-Server files that are in use can't be replaced either, so the server sync fails while the server is running.
+**Server** takes either a folder on this computer or a remote server over SFTP:
+
+- `D:\server`: a local server folder. 
+- `user@host:/path/to/server` or `sftp://user@host:port/path/to/server`: a remote server. The sign-in uses the key in **SSH key**, by default the first of `id_ed25519`, `id_ecdsa` and `id_rsa` in `%USERPROFILE%\.ssh`. The host must already be in `%USERPROFILE%\.ssh\known_hosts`, so connect to it once with `ssh` first. Keys with a passphrase and PuTTY `.ppk` keys are not supported; convert a `.ppk` key to OpenSSH format with PuTTYgen. Replaced server files are kept in `modhound-backups` next to the server's `mods` folder. 
+
+A local server has to be stopped before updating, because the files of a running server can't be replaced. A remote server can keep running while it is updated, but it has to be restarted afterwards to load the new mods. 
 
 ## CurseForge API key
 
@@ -44,7 +49,8 @@ CurseForge lookups need a CurseForge Core API key from https://console.curseforg
 Open the settings with the gear at the top. Changes are saved as you make them.
 
 - **CurseForge API key**
-- **Server folder**
+- **Server**: a local server folder or a remote server.
+- **SSH key**: the key for a remote server.
 - **Theme**: System, Light or Dark.
 - **Debug mode**: shows the log console and writes it to a file. 
 

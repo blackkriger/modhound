@@ -18,6 +18,10 @@ export function CheckAppUpdate() {
   return window['go']['main']['App']['CheckAppUpdate']();
 }
 
+export function ChooseKey() {
+  return window['go']['main']['App']['ChooseKey']();
+}
+
 export function ChoosePack() {
   return window['go']['main']['App']['ChoosePack']();
 }
@@ -54,8 +58,8 @@ export function OpenURL(arg1) {
   return window['go']['main']['App']['OpenURL'](arg1);
 }
 
-export function SaveSettings(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['SaveSettings'](arg1, arg2, arg3, arg4);
+export function SaveSettings(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['SaveSettings'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function SelectPack(arg1) {
@@ -72,6 +76,10 @@ export function SetConsoleOpen(arg1) {
 
 export function SetSkipped(arg1, arg2) {
   return window['go']['main']['App']['SetSkipped'](arg1, arg2);
+}
+
+export function SetSort(arg1, arg2) {
+  return window['go']['main']['App']['SetSort'](arg1, arg2);
 }
 
 export function Settings() {

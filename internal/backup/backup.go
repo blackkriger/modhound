@@ -26,7 +26,15 @@ type Item struct {
 	To       string `json:"to"`
 	Restored bool   `json:"restored"`
 	Time     string `json:"time,omitempty"`
+	Remote   string `json:"remote,omitempty"`
 }
+
+type RemoteStore interface {
+	Restore(it Item) error
+	Remove(it Item) error
+}
+
+var Remote RemoteStore
 
 type Session struct {
 	ID    string `json:"id"`
@@ -143,7 +151,11 @@ func prune(dir, newest string) {
 		kept := s.Items[:0]
 		for _, it := range s.Items {
 			if it.Restored || taken[it.Key] {
-				os.Remove(filepath.Join(s.dir, it.Stored))
+				if it.Remote == "" {
+					os.Remove(filepath.Join(s.dir, it.Stored))
+				} else if Remote != nil && !it.Restored {
+					Remote.Remove(it)
+				}
 				changed = true
 				continue
 			}
@@ -262,6 +274,12 @@ type Result struct {
 }
 
 func (s *Session) restore(it Item) error {
+	if it.Remote != "" {
+		if Remote == nil {
+			return errors.New("remote servers are not available")
+		}
+		return Remote.Restore(it)
+	}
 	stored := filepath.Join(s.dir, it.Stored)
 	if _, err := os.Stat(stored); err != nil {
 		return errors.New("the saved copy is missing")

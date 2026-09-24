@@ -32,6 +32,8 @@ type Diff struct {
 	Root  string `json:"root"`
 	Mods  int    `json:"mods"`
 	Items []Item `json:"items"`
+
+	remote bool
 }
 
 func (d *Diff) Only(keys map[string]bool) {
@@ -57,6 +59,9 @@ type serverJar struct {
 }
 
 func Compare(client *resolve.Pack, root string) (*Diff, error) {
+	if IsRemote(root) {
+		return compareRemote(client, root)
+	}
 	modsDir, err := resolve.FindModsDir(root)
 	if err != nil {
 		return nil, err
@@ -149,6 +154,9 @@ func isVersionDir(name string) bool {
 var ErrInUse = errors.New("server mod files are in use")
 
 func Sync(diff *Diff, session *backup.Session, mcVersion string) ([]Result, error) {
+	if diff.remote {
+		return syncRemote(diff, session, mcVersion)
+	}
 	for _, it := range diff.Items {
 		if install.InUse(it.serverPath) {
 			logx.Printf("%s is in use by another program", it.serverPath)

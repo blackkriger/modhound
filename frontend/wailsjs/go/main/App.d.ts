@@ -11,6 +11,8 @@ export function Check(arg1:string):Promise<resolve.Pack>;
 
 export function CheckAppUpdate():Promise<string>;
 
+export function ChooseKey():Promise<string>;
+
 export function ChoosePack():Promise<string>;
 
 export function ChooseServer():Promise<string>;
@@ -29,7 +31,7 @@ export function OpenReport(arg1:string):Promise<void>;
 
 export function OpenURL(arg1:string):Promise<void>;
 
-export function SaveSettings(arg1:string,arg2:string,arg3:boolean,arg4:string):Promise<void>;
+export function SaveSettings(arg1:string,arg2:string,arg3:boolean,arg4:string,arg5:string):Promise<void>;
 
 export function SelectPack(arg1:string):Promise<void>;
 
@@ -38,6 +40,8 @@ export function ServerBehind():Promise<number>;
 export function SetConsoleOpen(arg1:boolean):Promise<void>;
 
 export function SetSkipped(arg1:string,arg2:boolean):Promise<void>;
+
+export function SetSort(arg1:string,arg2:string):Promise<void>;
 
 export function Settings():Promise<main.Settings>;
 

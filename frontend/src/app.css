@@ -299,3 +299,18 @@ html, body {
 .m3-sort:hover {
     color: var(--fg);
 }
+
+.m3-field.is-off .m3-label, .m3-field.is-off .m3-input {
+    opacity: .5;
+}
+
+.m3-field.is-off input, .m3-field.is-off button {
+    pointer-events: none;
+}
+
+.m3-hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--muted);
+}
