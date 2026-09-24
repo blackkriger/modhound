@@ -107,7 +107,7 @@ func javaName(major int) string {
 	return fmt.Sprintf("class version %d", major)
 }
 
-var slots = make(chan struct{}, 3)
+var slots = make(chan struct{}, 2)
 
 func Run(ctx context.Context, pack *resolve.Pack, mods []*resolve.Mod, session *backup.Session, onEvent func(Event)) []Result {
 	emit := func(e Event) {
