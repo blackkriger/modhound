@@ -1,0 +1,285 @@
+html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    user-select: none;
+}
+
+.m3 {
+    width: 100vw;
+    height: 100vh;
+}
+
+.m3 [hidden] {
+    display: none !important;
+}
+
+.m3-top {
+    --wails-draggable: drag;
+}
+
+.m3-top button, .m3-top input, .m3-top label {
+    --wails-draggable: no-drag;
+}
+
+.m3-list:focus {
+    outline: none;
+}
+
+.m3-empty {
+    padding: 48px 16px;
+    text-align: center;
+    color: var(--muted);
+}
+
+.m3-insp {
+    user-select: text;
+}
+
+.m3-line {
+    width: 100%;
+    display: flex;
+    gap: 10px;
+    margin: 0 -8px;
+    padding: 2px 8px;
+    box-sizing: content-box;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    text-align: left;
+    font: inherit;
+}
+
+.m3-line[aria-pressed="false"] {
+    opacity: .45;
+}
+
+.m3-line--big {
+    display: block;
+    padding: 6px 8px;
+}
+
+.m3-line--big span {
+    display: block;
+}
+
+.m3-hero {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.m3-hero > div {
+    min-width: 0;
+}
+
+.m3-hero .m3-title {
+    font-size: 20px;
+    overflow-wrap: anywhere;
+}
+
+.m3-acts {
+    position: absolute;
+    right: 6px;
+    top: 5px;
+    display: flex;
+    gap: 6px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.m3-row:hover .m3-acts, .m3-acts:focus-within {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.m3-row.has-acts:hover .m3-ver, .m3-row.has-acts:hover .m3-note {
+    visibility: hidden;
+}
+
+.m3-act {
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: 5px;
+    background: var(--pane);
+    font-size: 12px;
+}
+
+.m3-act:hover {
+    border-color: var(--fg);
+}
+
+.m3 .m3-act--primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--on-accent);
+}
+
+.m3-steps .is-ok {
+    color: var(--plus);
+}
+
+.m3-steps .is-now {
+    color: var(--accent);
+}
+
+.m3-steps.is-done {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+}
+
+.m3-sep--check {
+    padding-left: 0;
+}
+
+.m3-sep--check .m3-check-slot {
+    margin-right: -4px;
+}
+
+.m3-last {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.m3-file {
+    color: var(--fg);
+    font-family: var(--mono);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+}
+
+.m3-file.is-off {
+    color: var(--muted);
+    text-decoration-color: var(--line);
+    pointer-events: none;
+}
+
+.m3-notes {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.m3-notes-text {
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+    font: 11.5px/1.5 var(--mono);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+.m3-tech {
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 10px;
+    font: 11px/1.45 var(--mono);
+}
+
+.m3-tech dt {
+    color: var(--muted);
+}
+
+.m3-tech dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.m3-console {
+    flex: none;
+    height: 220px;
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--line);
+    background: var(--pane);
+}
+
+.m3-console-bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px 8px 16px;
+    border-bottom: 1px solid var(--line);
+}
+
+.m3-console-spacer {
+    flex: 1;
+}
+
+.m3-console-log {
+    flex: 1;
+    min-height: 0;
+    margin: 0;
+    padding: 8px 16px;
+    overflow: auto;
+    font: 11px/1.5 var(--mono);
+    color: var(--muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+.m3-reason.is-muted {
+    color: var(--muted);
+}
+
+@keyframes m3-in {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+.is-reveal .m3-insp > * {
+    animation: m3-in .4s ease-out both;
+}
+
+.m3-row.is-new {
+    animation: m3-in .32s ease-out both;
+    animation-delay: var(--enter, 0ms);
+}
+
+@keyframes m3-pulse {
+    50% {
+        opacity: .4;
+    }
+}
+
+.m3-last.is-enter {
+    animation: m3-in .4s ease-out both;
+}
+
+.m3-file.is-busy, .m3-note.is-busy, .m3-steps .is-busy {
+    animation: m3-pulse 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .is-reveal .m3-insp > *, .m3-row.is-new, .m3-last.is-enter, .m3-file.is-busy, .m3-note.is-busy, .m3-steps .is-busy {
+        animation: none;
+    }
+}
+
+.m3-split {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.m3-search[hidden] + .m3-ghost {
+    margin-left: auto;
+}
