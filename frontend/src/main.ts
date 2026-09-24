@@ -288,12 +288,14 @@ function rowHTML({m, as}: Row): string {
         const warning = state.mode === 'report' ? state.report?.installed?.find(f => f.id === m.id)?.warning : '';
         const when = updatedAt(updatedTime(m));
         if (warning) note = `<span class="m3-note m3-note--bad">${esc(warning)}</span>`;
-        else if (when) note = `<span class="m3-note">${esc(when)}</span>`;
+        else if (when && state.sort.updated === 'date') note = `<span class="m3-note">${esc(when)}</span>`;
     } else if (st === 'queued') {
         note = '<span class="m3-note">queued</span>';
     } else if (st === 'downloading') {
         note = '<span class="m3-note is-busy">updating…</span>';
     }
+    const section = st === 'update' ? 'updates' : st === 'need' ? 'need you' : '';
+    if (!note && section && state.sort[section] === 'date' && m.target?.date) note = `<span class="m3-note">${esc(releaseDate(m.target.date))}</span>`;
     const busy = state.mode === 'checking' || state.mode === 'installing';
     const canCheck = st === 'update' || ['done', 'downloading', 'queued', 'failed'].includes(st) && state.mode === 'installing';
     const checked = state.mode === 'installing' || !state.unchecked.has(m.id);
