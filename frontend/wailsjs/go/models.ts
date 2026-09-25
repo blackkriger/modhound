@@ -275,6 +275,7 @@ export namespace main {
 	    unknown: string[];
 	    server?: ServerSync;
 	    path: string;
+	    rechecked: resolve.Replaced[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Report(source);
@@ -293,6 +294,7 @@ export namespace main {
 	        this.unknown = source["unknown"];
 	        this.server = this.convertValues(source["server"], ServerSync);
 	        this.path = source["path"];
+	        this.rechecked = this.convertValues(source["rechecked"], resolve.Replaced);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -377,6 +379,28 @@ export namespace main {
 
 export namespace resolve {
 	
+	export class Choice {
+	    id: string;
+	    version: string;
+	    fileName: string;
+	    date: string;
+	    installed: boolean;
+	    pre: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Choice(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.version = source["version"];
+	        this.fileName = source["fileName"];
+	        this.date = source["date"];
+	        this.installed = source["installed"];
+	        this.pre = source["pre"];
+	    }
+	}
 	export class ModDebug {
 	    path: string;
 	    sha1: string;

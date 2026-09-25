@@ -23,11 +23,12 @@ Currently supports Forge.
 
    The counters on the right filter the list.
 4. Click **Update all**, or uncheck mods first to update only the selected ones. Hover a row to update or skip a single mod. Click a row for details and what's new.
-5. When it finishes, the report is saved and the updated mods are listed on the right. 
+5. When it finishes, the report is saved and the updated mods are listed on the right.
+6. If you need a specific version of a mod, click a row and then **Select version**: every version built for your Minecraft version is listed, a click on a version shows its changes, and **Install** puts the chosen one in place of the current jar, newer or older. 
 
 ## Undo
 
-modhound keeps the previous version of each mod it updates. Updating a mod again replaces the kept version with the one just replaced. Hover an updated mod and click **Undo**, or use **Undo all** after an update.
+modhound keeps the previous version of each mod it updates. Updating a mod again replaces the kept version with the one just replaced. Hover an updated mod and click **Undo**, or check several updated mods and click **Undo**, or use **Undo all** after an update. 
 
 ## Server
 

@@ -17,6 +17,8 @@ export function ChoosePack():Promise<string>;
 
 export function ChooseServer():Promise<string>;
 
+export function ChooseVersion(arg1:string,arg2:string):Promise<resolve.Mod>;
+
 export function DefaultPack():Promise<string>;
 
 export function KeepWindowSize():Promise<void>;
@@ -52,3 +54,7 @@ export function SyncServer():Promise<main.ServerSync>;
 export function Undo(arg1:Array<string>):Promise<main.UndoResult>;
 
 export function Update(arg1:Array<string>,arg2:boolean):Promise<main.Report>;
+
+export function VersionNotes(arg1:string,arg2:string):Promise<string>;
+
+export function Versions(arg1:string):Promise<Array<resolve.Choice>>;

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/blackkriger/modhound/internal/fsx"
 )
 
 func TestKeepAndRestore(t *testing.T) {
@@ -14,7 +16,7 @@ func TestKeepAndRestore(t *testing.T) {
 
 	s := Begin(root, mods)
 	item := Item{Key: "k", Name: "Mod", Dir: mods, OldFile: "mod-1.0.jar", NewFile: "mod-1.1.jar"}
-	if _, err := s.Keep(oldPath, &item); err != nil {
+	if _, err := s.Keep(fsx.Local, oldPath, "", &item); err != nil {
 		t.Fatal(err)
 	}
 	os.WriteFile(newPath, []byte("new"), 0o644)
@@ -49,7 +51,7 @@ func TestKeepsPreviousVersionPerMod(t *testing.T) {
 	update := func(key, from, to string) {
 		s := Begin(root, mods)
 		item := Item{Key: key, Dir: mods, OldFile: from, NewFile: to}
-		if _, err := s.Keep(filepath.Join(mods, from), &item); err != nil {
+		if _, err := s.Keep(fsx.Local, filepath.Join(mods, from), "", &item); err != nil {
 			t.Fatal(err)
 		}
 		put(to, to)
@@ -85,7 +87,7 @@ func TestSessionGrowsAcrossSaves(t *testing.T) {
 		old := name + "-1.jar"
 		os.WriteFile(filepath.Join(mods, old), []byte(old), 0o644)
 		item := Item{Key: name, Dir: mods, OldFile: old, NewFile: name + "-2.jar"}
-		if _, err := s.Keep(filepath.Join(mods, old), &item); err != nil {
+		if _, err := s.Keep(fsx.Local, filepath.Join(mods, old), "", &item); err != nil {
 			t.Fatal(err)
 		}
 		os.WriteFile(filepath.Join(mods, item.NewFile), []byte(item.NewFile), 0o644)
@@ -107,5 +109,55 @@ func TestSessionGrowsAcrossSaves(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(mods, name)); err != nil {
 			t.Fatalf("%s not restored", name)
 		}
+	}
+}
+
+func TestPruneFollowsTheFileNotTheProject(t *testing.T) {
+	root, mods := t.TempDir(), t.TempDir()
+	put := func(name string) { os.WriteFile(filepath.Join(mods, name), []byte(name), 0o644) }
+	update := func(from, to string) {
+		s := Begin(root, mods)
+		item := Item{Key: "cf:1", Dir: mods, OldFile: from, NewFile: to}
+		if _, err := s.Keep(fsx.Local, filepath.Join(mods, from), "", &item); err != nil {
+			t.Fatal(err)
+		}
+		put(to)
+		s.Add(item)
+		if err := s.Save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("lib-api-1.jar")
+	put("lib-1.jar")
+	update("lib-api-1.jar", "lib-api-2.jar")
+	update("lib-1.jar", "lib-2.jar")
+	var kept []string
+	for _, s := range All(root, mods) {
+		for _, it := range s.Pending() {
+			kept = append(kept, it.OldFile)
+		}
+	}
+	if len(kept) != 2 {
+		t.Fatalf("both jars of one project keep their backups, got %v", kept)
+	}
+}
+
+func TestRestoreRefusesASecondVersion(t *testing.T) {
+	root, mods := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(mods, "mod-1.0.jar"), []byte("1"), 0o644)
+	s := Begin(root, mods)
+	item := Item{Key: "k", Dir: mods, OldFile: "mod-1.0.jar", NewFile: "mod-2.0.jar"}
+	if _, err := s.Keep(fsx.Local, filepath.Join(mods, "mod-1.0.jar"), "", &item); err != nil {
+		t.Fatal(err)
+	}
+	s.Add(item)
+	s.Save()
+	os.WriteFile(filepath.Join(mods, "mod-3.0.jar"), []byte("3"), 0o644)
+	res := All(root, mods)[0].Restore(map[string]bool{"k|mod-2.0.jar": true})
+	if len(res) != 1 || res[0].OK {
+		t.Fatalf("restore must refuse while mod-3.0.jar is in the folder: %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(mods, "mod-1.0.jar")); err == nil {
+		t.Fatal("mod-1.0.jar was put back next to mod-3.0.jar")
 	}
 }

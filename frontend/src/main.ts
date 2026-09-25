@@ -1,7 +1,7 @@
 import './modhound.css';
 import './app.css';
 
-import {ApplyAppUpdate, Changelog, Check, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, DefaultPack, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update} from '../wailsjs/go/main/App';
+import {ApplyAppUpdate, Changelog, Check, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, ChooseVersion, DefaultPack, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update, VersionNotes, Versions} from '../wailsjs/go/main/App';
 import {main, resolve} from '../wailsjs/go/models';
 import {ClipboardSetText, EventsOn, Quit, WindowMinimise} from '../wailsjs/runtime/runtime';
 
@@ -51,6 +51,13 @@ const state = {
     q: '',
     kindsOn: {up: true, upd: true, need: true, nf: true, sk: true, cur: false} as Record<Kind, boolean>,
     unchecked: new Set<string>(),
+    undoPicked: new Set<string>(),
+    versions: new Map<string, resolve.Choice[] | string>(),
+    versionsOpen: '',
+    versionsAll: false,
+    versionOpen: '',
+    versionNotes: new Map<string, string | undefined>(),
+    choosing: '',
     selId: null as string | null,
     settingsOpen: false,
     showKey: false,
@@ -149,11 +156,39 @@ function morph(from: Node, to: Node) {
     morphChildren(from, to);
 }
 
+function keyOf(n: Node): string | null {
+    return n instanceof Element ? n.getAttribute('data-id') : null;
+}
+
 function morphChildren(from: Element, to: Element) {
-    const old = Array.from(from.childNodes);
-    const next = Array.from(to.childNodes);
-    next.forEach((n, i) => (i < old.length ? morph(old[i], n) : from.appendChild(n)));
-    for (let i = next.length; i < old.length; i++) from.removeChild(old[i]);
+    const keyed = new Map<string, ChildNode>();
+    for (const c of Array.from(from.childNodes)) {
+        const key = keyOf(c);
+        if (key !== null) keyed.set(key, c);
+    }
+    let cursor: ChildNode | null = from.firstChild;
+    for (const n of Array.from(to.childNodes)) {
+        const key = keyOf(n);
+        let match: ChildNode | null = null;
+        if (key !== null) {
+            match = keyed.get(key) ?? null;
+            keyed.delete(key);
+        } else if (cursor && keyOf(cursor) === null) {
+            match = cursor;
+        }
+        if (!match) {
+            from.insertBefore(n, cursor);
+            continue;
+        }
+        if (match === cursor) cursor = cursor.nextSibling;
+        else from.insertBefore(match, cursor);
+        morph(match, n);
+    }
+    while (cursor) {
+        const next: ChildNode | null = cursor.nextSibling;
+        from.removeChild(cursor);
+        cursor = next;
+    }
 }
 
 function patch(el: HTMLElement, html: string) {
@@ -298,15 +333,16 @@ function rowHTML({m, as}: Row): string {
     const section = st === 'update' ? 'updates' : st === 'need' ? 'need you' : '';
     if (!note && section && state.sort[section] === 'date' && m.target?.date) note = `<span class="m3-note">${esc(releaseDate(m.target.date))}</span>`;
     const busy = state.mode === 'checking' || state.mode === 'installing';
-    const canCheck = st === 'update' || ['done', 'downloading', 'queued', 'failed'].includes(st) && state.mode === 'installing';
-    const checked = state.mode === 'installing' || !state.unchecked.has(m.id);
+    const undoRow = st === 'done' && state.mode !== 'installing' && canPickUndo(m);
+    const canCheck = st === 'update' || undoRow || ['done', 'downloading', 'queued', 'failed'].includes(st) && state.mode === 'installing';
+    const checked = undoRow ? state.undoPicked.has(m.id) : state.mode === 'installing' || !state.unchecked.has(m.id);
     const selected = state.selId === m.id;
     const restoring = state.undoActive.includes(m.id);
     if (restoring) note = '<span class="m3-note is-busy">restoring…</span>';
     const open = state.mode !== 'checking' && !selected && !restoring;
     const canSkip = !busy && open && m.source !== '' && ['update', 'skipped', 'cur'].includes(st);
     const canUpdate = open && st === 'update' && !m.skipped;
-    const canUndo = open && ['done', 'update', 'skipped'].includes(st) && !!undoItem(m.key, installedFile(m));
+    const canUndo = open && !state.install.has(m.id) && ['done', 'update', 'skipped'].includes(st) && !!undoItem(m.key, installedFile(m));
     const actions = [
         canUpdate ? '<button type="button" class="m3-act m3-act--primary" data-act="update">Update</button>' : '',
         canUndo ? '<button type="button" class="m3-act" data-act="undo">Undo</button>' : '',
@@ -397,12 +433,15 @@ function renderChanges() {
     for (const [label, rows] of sections) {
         const visible = sortRows(label, rows.filter(r => matchesQuery(r.m)));
         if (!visible.length) continue;
-        const selectable = state.mode === 'ready' && label === 'updates' && visible.some(r => kindOf(r.m) === 'up');
+        const idle = state.mode === 'ready' || state.mode === 'report';
+        const selectAll = !idle ? '' : label === 'updates' && visible.some(r => kindOf(r.m) === 'up')
+            ? 'select-all'
+            : label === 'updated' && visible.some(r => canPickUndo(r.m)) ? 'select-all-updated' : '';
         const sort = state.mode !== 'checking' && label in state.sort && visible.length > 1
             ? `<button type="button" class="m3-sort" data-sort="${label}">by ${state.sort[label]}</button>`
             : '';
-        html += selectable
-            ? `<div class="m3-sep m3-sep--check"><span class="m3-check-slot"><input type="checkbox" class="m3-check" id="select-all" aria-label="Select all updates"></span>${label}${sort}</div>`
+        html += selectAll
+            ? `<div class="m3-sep m3-sep--check"><span class="m3-check-slot"><input type="checkbox" class="m3-check" id="${selectAll}" aria-label="Select all ${label}"></span>${label}${sort}</div>`
             : `<div class="m3-sep">${label}${sort}</div>`;
         html += visible.map(rowHTML).join('');
     }
@@ -416,13 +455,108 @@ function visibleUpdates(): resolve.Mod[] {
     return allMods().filter(m => kindOf(m) === 'up' && matchesQuery(m));
 }
 
+function canPickUndo(m: resolve.Mod): boolean {
+    return !state.undoActive.includes(m.id) && !!undoItem(m.key, installedFile(m));
+}
+
+function isUpdatedRow(m: resolve.Mod): boolean {
+    return kindOf(m) === 'upd' || (state.mode === 'report' && !!state.report?.installed?.some(r => r.id === m.id));
+}
+
+function undoCandidates(): resolve.Mod[] {
+    return allMods().filter(m => isUpdatedRow(m) && canPickUndo(m));
+}
+
+function pickedUndos(): resolve.Mod[] {
+    return undoCandidates().filter(m => state.undoPicked.has(m.id));
+}
+
 function syncSelectAll() {
-    const box = document.getElementById('select-all') as HTMLInputElement | null;
-    if (!box) return;
-    const mods = visibleUpdates();
-    const on = mods.filter(m => !state.unchecked.has(m.id)).length;
-    box.checked = on === mods.length;
-    box.indeterminate = on > 0 && on < mods.length;
+    const sync = (id: string, total: number, on: number) => {
+        const box = document.getElementById(id) as HTMLInputElement | null;
+        if (!box) return;
+        box.checked = total > 0 && on === total;
+        box.indeterminate = on > 0 && on < total;
+    };
+    const ups = visibleUpdates();
+    sync('select-all', ups.length, ups.filter(m => !state.unchecked.has(m.id)).length);
+    const undos = undoCandidates().filter(matchesQuery);
+    sync('select-all-updated', undos.length, undos.filter(m => state.undoPicked.has(m.id)).length);
+}
+
+function versionsHTML(m: resolve.Mod): string {
+    const list = state.versions.get(m.id);
+    if (list === undefined) return '<p class="m3-reason is-muted">Loading versions…</p>';
+    if (typeof list === 'string') return `<p class="m3-reason m3-bad">${esc(list)}</p>`;
+    if (!list.length) return '<p class="m3-reason is-muted">No versions for this Minecraft version</p>';
+    const busy = busyOps() || !!state.choosing;
+    const shown = state.versionsAll ? list : list.filter((c, i) => i < 20 || c.installed);
+    const more = list.length - shown.length;
+    const notes = (c: resolve.Choice) => {
+        if (state.versionOpen !== c.id) return '';
+        const text = state.versionNotes.get(`${m.id}|${c.id}`);
+        return `<li class="is-notes">${text === undefined ? '<p class="m3-reason is-muted">Loading…</p>' : text ? `<pre class="m3-notes-text">${esc(text)}</pre>` : '<p class="m3-reason is-muted">No notes for this version</p>'}</li>`;
+    };
+    return `<ul class="m3-steps">${shown.map(c => `<li>
+        <a href="#" class="t m3-vlink" data-vnotes="${esc(c.id)}">${esc(c.version)}${c.pre ? ' (pre)' : ''}</a>
+        <span class="n">${esc(c.date)}</span>
+        ${c.installed
+            ? '<span class="n">installed</span>'
+            : `<a href="#" class="m3-file${state.choosing === c.id ? ' is-busy' : busy ? ' is-off' : ''}" data-choice="${esc(c.id)}">Install</a>`}
+    </li>${notes(c)}`).join('')}</ul>${more ? `<a href="#" class="m3-file" id="versions-all">Show all ${list.length} versions</a>` : ''}`;
+}
+
+async function toggleVersions(m: resolve.Mod) {
+    if (state.versionsOpen === m.id) {
+        state.versionsOpen = '';
+        renderInspector();
+        return;
+    }
+    state.versionsOpen = m.id;
+    state.versionsAll = false;
+    state.versionOpen = '';
+    state.versions.delete(m.id);
+    renderInspector();
+    try {
+        state.versions.set(m.id, await Versions(m.id));
+    } catch (e) {
+        state.versions.set(m.id, String(e));
+    }
+    renderInspector();
+}
+
+async function toggleVersionNotes(m: resolve.Mod, choice: string) {
+    state.versionOpen = state.versionOpen === choice ? '' : choice;
+    const key = `${m.id}|${choice}`;
+    renderInspector();
+    if (!state.versionOpen || state.versionNotes.has(key)) return;
+    state.versionNotes.set(key, undefined);
+    let text = '';
+    try {
+        text = await VersionNotes(m.id, choice);
+    } catch {
+        text = '';
+    }
+    state.versionNotes.set(key, text);
+    renderInspector();
+}
+
+async function chooseVersion(m: resolve.Mod, choice: string) {
+    if (state.choosing || busyOps()) return;
+    state.choosing = choice;
+    renderInspector();
+    try {
+        const mod = await ChooseVersion(m.id, choice);
+        state.mods.set(mod.id, mod);
+        modsChanged();
+        state.choosing = '';
+        state.versionsOpen = '';
+        runUpdate([mod.id]);
+    } catch (e) {
+        state.choosing = '';
+        state.error = String(e);
+        render();
+    }
 }
 
 function serverLines(sync?: main.ServerSync): [string, string, number, string][] {
@@ -567,6 +701,7 @@ function inspectorHTML(): string {
         const links = [
             sel.url && sel.source ? `<a href="#" data-url="${esc(sel.url)}">Project page ${icon.ext}</a>` : '',
             showTo && t?.pageUrl ? `<a href="#" data-url="${esc(t.pageUrl)}">New version ${icon.ext}</a>` : '',
+            sel.source && !sel.skipped ? `<a href="#" id="sel-versions">${state.versionsOpen === sel.id ? 'Hide versions' : 'Select version'}</a>` : '',
         ].filter(Boolean).join('');
         return `<div class="m3-insp">
             <div class="m3-hero">
@@ -586,6 +721,7 @@ function inspectorHTML(): string {
             </div>
             <p class="m3-reason">${esc(reasonText(sel))}</p>
             ${links ? `<div class="m3-links">${links}</div>` : ''}
+            ${state.versionsOpen === sel.id ? versionsHTML(sel) : ''}
             ${showTo && state.mode === 'ready' ? notesHTML(sel.id) : ''}
             ${sel.debug ? techHTML(sel.debug) : ''}
         </div>
@@ -716,8 +852,10 @@ function renderTop() {
     $<HTMLButtonElement>('win-close').disabled = busyOps();
 }
 
-function updateLabel(n: number): string {
-    return n && n < allMods().filter(m => kindOf(m) === 'up').length ? `Update ${n} selected` : 'Update all';
+function updateLabel(n: number, u: number): string {
+    const word = n && u ? 'Update/undo' : u ? 'Undo' : 'Update';
+    const all = (n === 0 || n === allMods().filter(m => kindOf(m) === 'up').length) && (u === 0 || u === undoCandidates().length);
+    return all ? `${word} all` : `${word} selected`;
 }
 
 function renderFoot() {
@@ -761,8 +899,9 @@ function renderFoot() {
             first.textContent = 'Check';
             first.disabled = false;
             const n = selectedUpdates().length;
-            primary.textContent = f ? `Retry ${f} failed` : updateLabel(n);
-            primary.disabled = busyOps() || (!f && n === 0);
+            const u = pickedUndos().length;
+            primary.textContent = f ? `Retry ${f} failed` : updateLabel(n, u);
+            primary.disabled = busyOps() || (!f && n + u === 0);
             break;
         }
         default: {
@@ -774,8 +913,9 @@ function renderFoot() {
                     : `<span>checked ${ago(state.checkedAt)}, <b>${state.pack?.mods.length ?? 0}</b> mods read</span>`;
             first.textContent = 'Check';
             first.disabled = false;
-            primary.textContent = updateLabel(n);
-            primary.disabled = busyOps() || n === 0;
+            const u = pickedUndos().length;
+            primary.textContent = updateLabel(n, u);
+            primary.disabled = busyOps() || n + u === 0;
         }
     }
 }
@@ -867,6 +1007,10 @@ async function runCheck() {
     state.notice = '';
     state.report = null;
     state.selId = null;
+    state.versions = new Map();
+    state.versionsOpen = '';
+    state.versionOpen = '';
+    state.versionNotes = new Map();
     state.settingsOpen = false;
     state.recheck = false;
     state.doneAt = new Map();
@@ -958,12 +1102,19 @@ function animateCounts(scope: HTMLElement) {
     });
 }
 
+let installedIndex: { src: unknown; map: Map<string, string> } = {src: null, map: new Map()};
+let undoIndex: { src: unknown; map: Map<string, main.LastUpdate['restorable'][number]> } = {src: null, map: new Map()};
+
 function installedFile(m: resolve.Mod): string {
-    return state.mode === 'report' && state.report?.installed?.some(r => r.id === m.id) ? m.target?.fileName ?? '' : m.fileName;
+    const installed = state.mode === 'report' ? state.report?.installed : undefined;
+    if (installedIndex.src !== installed) installedIndex = {src: installed, map: new Map((installed ?? []).map(r => [r.id, r.fileTo]))};
+    return installedIndex.map.get(m.id) ?? m.fileName;
 }
 
 function undoItem(key: string, file: string) {
-    return state.lastUpdate?.restorable?.find(it => it.key === key && it.newFile === file);
+    const list = state.lastUpdate?.restorable;
+    if (undoIndex.src !== list) undoIndex = {src: list, map: new Map((list ?? []).map(it => [`${it.key}|${it.newFile}`, it]))};
+    return undoIndex.map.get(`${key}|${file}`);
 }
 
 function isRemote(s: string): boolean {
@@ -996,6 +1147,7 @@ async function runUndo(ids: string[], mods: string[]) {
             undone.add(oldId);
             state.mods.delete(oldId);
             state.mods.set(mod.id, mod);
+            state.unchecked.add(mod.id);
             if (state.selId === oldId) state.selId = mod.id;
         }
         modsChanged();
@@ -1069,13 +1221,20 @@ async function runUpdate(ids: string[]) {
     render();
     try {
         state.report = await Update(ids, continued);
+        for (const {oldId, mod} of state.report.rechecked ?? []) {
+            if (!mod) continue;
+            state.mods.delete(oldId);
+            state.mods.set(mod.id, mod);
+            state.unchecked.add(mod.id);
+        }
         for (const r of state.report.installed ?? []) {
             const m = state.mods.get(r.id);
-            if (m) {
+            if (m && m.status === 'update' && m.target?.fileName === r.fileTo) {
                 m.status = 'current';
                 m.reason = '';
             }
         }
+        modsChanged();
     } catch (e) {
         state.error = String(e);
         for (const id of ids) state.install.delete(id);
@@ -1232,8 +1391,18 @@ $('first').addEventListener('click', () => {
 });
 
 $('primary').addEventListener('click', () => {
-    if (state.mode === 'ready') runUpdate(selectedUpdates().map(m => m.id));
-    else if (state.mode === 'report') runUpdate(state.report?.failed?.length ? state.report.failed.map(f => f.id) : selectedUpdates().map(m => m.id));
+    if (state.mode !== 'ready' && state.mode !== 'report') return;
+    if (state.mode === 'report' && state.report?.failed?.length) {
+        runUpdate(state.report.failed.map(f => f.id));
+        return;
+    }
+    const undos = pickedUndos();
+    const updates = selectedUpdates().map(m => m.id);
+    if (undos.length) {
+        for (const m of undos) state.undoPicked.delete(m.id);
+        runUndo(undos.map(m => `${m.key}|${installedFile(m)}`), undos.map(m => m.id));
+    }
+    if (updates.length) runUpdate(updates);
 });
 
 $('list').addEventListener('click', e => {
@@ -1253,11 +1422,21 @@ $('list').addEventListener('click', e => {
         renderFoot();
         return;
     }
+    if (el.id === 'select-all-updated') {
+        const mods = undoCandidates().filter(matchesQuery);
+        const all = mods.every(m => state.undoPicked.has(m.id));
+        for (const m of mods) all ? state.undoPicked.delete(m.id) : state.undoPicked.add(m.id);
+        renderChanges();
+        renderFoot();
+        return;
+    }
     const row = el.closest<HTMLElement>('.m3-row');
     const m = row ? state.mods.get(row.dataset.id!) : undefined;
     if (!m) return;
     if (el.classList.contains('m3-check')) {
-        (el as HTMLInputElement).checked ? state.unchecked.delete(m.id) : state.unchecked.add(m.id);
+        const on = (el as HTMLInputElement).checked;
+        if (kindOf(m) === 'up') on ? state.unchecked.delete(m.id) : state.unchecked.add(m.id);
+        else on ? state.undoPicked.add(m.id) : state.undoPicked.delete(m.id);
         syncSelectAll();
         renderFoot();
         return;
@@ -1306,6 +1485,30 @@ $('insp').addEventListener('click', e => {
     if (link) {
         e.preventDefault();
         OpenURL(link.dataset.url!);
+        return;
+    }
+    const choice = el.closest<HTMLElement>('[data-choice]')?.dataset.choice;
+    const chosenMod = state.selId ? state.mods.get(state.selId) : undefined;
+    if (choice && chosenMod) {
+        e.preventDefault();
+        chooseVersion(chosenMod, choice);
+        return;
+    }
+    const vnotes = el.closest<HTMLElement>('[data-vnotes]')?.dataset.vnotes;
+    if (vnotes && chosenMod) {
+        e.preventDefault();
+        toggleVersionNotes(chosenMod, vnotes);
+        return;
+    }
+    if (el.closest('#versions-all')) {
+        e.preventDefault();
+        state.versionsAll = true;
+        renderInspector();
+        return;
+    }
+    if (el.closest('#sel-versions') && chosenMod) {
+        e.preventDefault();
+        toggleVersions(chosenMod);
         return;
     }
     const kind = el.closest<HTMLElement>('[data-kind]')?.dataset.kind as Kind | undefined;
@@ -1364,9 +1567,11 @@ $('insp').addEventListener('click', e => {
         case 'sync-server':
             runSync();
             break;
-        case 'undo-all':
-            runUndo([], (state.report?.installed ?? []).map(r => r.id));
+        case 'undo-all': {
+            const installed = (state.report?.installed ?? []).filter(r => state.mods.has(r.id));
+            runUndo(installed.map(r => `${state.mods.get(r.id)!.key}|${r.fileTo}`), installed.map(r => r.id));
             break;
+        }
         case 'sel-restore':
             if (sel) runUndo([`${sel.key}|${installedFile(sel)}`], [sel.id]);
             break;

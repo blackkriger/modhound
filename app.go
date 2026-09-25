@@ -16,8 +16,8 @@ import (
 
 	"github.com/blackkriger/modhound/internal/backup"
 	"github.com/blackkriger/modhound/internal/config"
+	"github.com/blackkriger/modhound/internal/fsx"
 	"github.com/blackkriger/modhound/internal/install"
-	"github.com/blackkriger/modhound/internal/jarinfo"
 	"github.com/blackkriger/modhound/internal/launchers"
 	"github.com/blackkriger/modhound/internal/logx"
 	"github.com/blackkriger/modhound/internal/opener"
@@ -70,17 +70,18 @@ type Manual struct {
 }
 
 type Report struct {
-	Time      string           `json:"time"`
-	Pack      string           `json:"pack"`
-	Installed []install.Result `json:"installed"`
-	Failed    []install.Result `json:"failed"`
-	UpToDate  int              `json:"upToDate"`
-	Skipped   []string         `json:"skipped"`
-	Remaining []string         `json:"remaining"`
-	Manual    []Manual         `json:"manual"`
-	Unknown   []string         `json:"unknown"`
-	Server    *ServerSync      `json:"server"`
-	Path      string           `json:"path"`
+	Time      string             `json:"time"`
+	Pack      string             `json:"pack"`
+	Installed []install.Result   `json:"installed"`
+	Failed    []install.Result   `json:"failed"`
+	UpToDate  int                `json:"upToDate"`
+	Skipped   []string           `json:"skipped"`
+	Remaining []string           `json:"remaining"`
+	Manual    []Manual           `json:"manual"`
+	Unknown   []string           `json:"unknown"`
+	Server    *ServerSync        `json:"server"`
+	Path      string             `json:"path"`
+	Rechecked []resolve.Replaced `json:"rechecked"`
 }
 
 type ServerSync struct {
@@ -98,7 +99,7 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	selfupdate.CleanOld()
 	migrateErr := config.Migrate()
-	server.KeyFor = func(string) string { return a.serverKey() }
+	fsx.KeyFor = func(string) string { return a.serverKey() }
 	go a.forwardLogs()
 	a.configureLog()
 	if migrateErr != nil {
@@ -193,7 +194,7 @@ func (a *App) serverKey() string {
 	if key := a.store.ServerKey(a.packRoot()); key != "" {
 		return key
 	}
-	return server.DefaultKey()
+	return fsx.DefaultKey()
 }
 
 func (a *App) ChooseKey() (string, error) {
@@ -226,13 +227,13 @@ func (a *App) SaveSettings(key, theme string, debug bool, serverDir, serverKey s
 	keyChanged := serverKey != a.serverKey()
 	switch {
 	case serverDir == "":
-	case server.IsRemote(serverDir):
+	case fsx.IsRemote(serverDir):
 		if serverDir != a.serverRoot() || keyChanged {
 			check := serverKey
 			if check == "" {
-				check = server.DefaultKey()
+				check = fsx.DefaultKey()
 			}
-			if err := server.CheckRemote(serverDir, check); err != nil {
+			if err := fsx.Check(serverDir, check); err != nil {
 				return err
 			}
 		}
@@ -250,7 +251,7 @@ func (a *App) SaveSettings(key, theme string, debug bool, serverDir, serverKey s
 		}
 	}
 	if pack != "" && keyChanged {
-		if serverKey == server.DefaultKey() {
+		if serverKey == fsx.DefaultKey() {
 			serverKey = ""
 		}
 		if err := a.store.SetServerKey(pack, serverKey); err != nil {
@@ -473,12 +474,11 @@ func (a *App) Update(ids []string, continued bool) (*Report, error) {
 		runtime.EventsEmit(a.ctx, "install", e)
 	})
 
-	a.post.Lock()
-	defer a.post.Unlock()
 	byID := map[string]*resolve.Mod{}
 	for _, m := range todo {
 		byID[m.ID] = m
 	}
+	a.post.Lock()
 	failed := report.Failed[:0:0]
 	for _, f := range report.Failed {
 		if byID[f.ID] == nil {
@@ -487,20 +487,53 @@ func (a *App) Update(ids []string, continued bool) (*Report, error) {
 	}
 	report.Failed = failed
 	keys := map[string]bool{}
+	moved := map[string]string{}
 	for _, r := range results {
-		if r.OK {
-			report.Installed = append(report.Installed, r)
-			markInstalled(pack, byID[r.ID])
-			keys[byID[r.ID].Key] = true
-		} else {
+		m := byID[r.ID]
+		if !r.OK || m == nil {
 			report.Failed = append(report.Failed, r)
+			continue
+		}
+		report.Installed = append(report.Installed, r)
+		chosen := m.Chosen()
+		pack.MarkInstalled(m)
+		keys[m.Key] = true
+		if chosen {
+			moved[m.Path] = m.Path
+		}
+	}
+	var client []server.Mod
+	if len(keys) > 0 {
+		client = server.Snapshot(pack)
+	}
+	a.post.Unlock()
+
+	var sync *ServerSync
+	if len(keys) > 0 {
+		sync = a.syncServer(ctx, client, pack.MCVersion, session, keys)
+	}
+	var rechecked []resolve.Replaced
+	if len(moved) > 0 {
+		var err error
+		if rechecked, err = pack.Recheck(context.WithoutCancel(ctx), moved, a.recheckOptions(pack.Root)); err != nil {
+			logx.Printf("recheck after choosing a version: %v", err)
+		}
+	}
+
+	a.post.Lock()
+	defer a.post.Unlock()
+	report.Server = mergeServer(report.Server, sync)
+	renamed := map[string]string{}
+	for _, r := range rechecked {
+		renamed[r.OldID] = r.Mod.ID
+	}
+	for i, x := range report.Installed {
+		if id, ok := renamed[x.ID]; ok {
+			report.Installed[i].ID = id
 		}
 	}
 	report.Skipped, report.Remaining, report.Manual, report.Unknown, report.UpToDate = nil, nil, nil, nil, 0
 	fillReport(report, pack)
-	if len(keys) > 0 {
-		report.Server = mergeServer(report.Server, a.syncServer(pack, session, keys))
-	}
 	if err := session.Save(); err != nil {
 		logx.Printf("backup session not saved: %v", err)
 	}
@@ -511,7 +544,47 @@ func (a *App) Update(ids []string, continued bool) (*Report, error) {
 	out := *report
 	out.Installed = append([]install.Result(nil), report.Installed...)
 	out.Failed = append([]install.Result(nil), report.Failed...)
+	out.Rechecked = rechecked
 	return &out, nil
+}
+
+func (a *App) recheckOptions(root string) resolve.Options {
+	cacheDir, _ := config.CacheDir()
+	return resolve.Options{
+		CurseForgeKey: a.store.CurseForgeKey(),
+		CacheDir:      cacheDir,
+		Skipped:       func(key string) bool { return a.store.Skipped(root, key) },
+	}
+}
+
+func (a *App) Versions(id string) ([]resolve.Choice, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	return pack.Versions(a.ctx, id, a.store.CurseForgeKey())
+}
+
+func (a *App) VersionNotes(id, choice string) (string, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return "", errors.New("no pack loaded")
+	}
+	return pack.VersionNotes(a.ctx, id, choice, a.store.CurseForgeKey())
+}
+
+func (a *App) ChooseVersion(id, choice string) (*resolve.Mod, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	return pack.Choose(a.ctx, id, choice, a.store.CurseForgeKey())
 }
 
 func fillReport(report *Report, pack *resolve.Pack) {
@@ -604,31 +677,26 @@ func (a *App) Undo(ids []string) (*UndoResult, error) {
 		return nil, err
 	}
 	defer a.leaveOp()
-	a.post.Lock()
-	defer a.post.Unlock()
-	all := backup.All(dir, a.packRoot())
-	if len(all) == 0 {
-		return nil, errors.New("there is nothing to undo")
-	}
-	var results []backup.Result
 	if len(ids) == 0 {
-		results = all[0].Restore(nil)
-	} else {
-		want := map[string]bool{}
-		for _, id := range ids {
-			want[id] = true
-			want[server.KeyPrefix+id] = true
-		}
-		for _, s := range all {
-			results = append(results, s.Restore(want)...)
-		}
+		return nil, errors.New("nothing to undo")
 	}
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+		want[server.KeyPrefix+id] = true
+	}
+	a.post.Lock()
+	var results []backup.Result
+	for _, s := range backup.All(dir, a.packRoot()) {
+		if a.session != nil && s.ID == a.session.ID {
+			s = a.session
+		}
+		results = append(results, s.Restore(want)...)
+	}
+	a.post.Unlock()
 	moved := map[string]string{}
 	for _, r := range results {
 		logx.Printf("undo %s: %s -> %s, ok=%v %s", r.Name, r.From, r.To, r.OK, r.Error)
-		if r.OK && a.session != nil {
-			a.session.MarkRestored(r.Key, r.NewFile)
-		}
 		if r.OK && !strings.HasPrefix(r.Key, server.KeyPrefix) {
 			moved[filepath.Join(r.Dir, r.NewFile)] = filepath.Join(r.Dir, r.File)
 		}
@@ -640,16 +708,7 @@ func (a *App) Undo(ids []string) (*UndoResult, error) {
 	if pack == nil || len(moved) == 0 {
 		return out, nil
 	}
-	cacheDir, err := config.CacheDir()
-	if err != nil {
-		return out, nil
-	}
-	root := pack.Root
-	out.Mods, err = pack.Recheck(context.WithoutCancel(ctx), moved, resolve.Options{
-		CurseForgeKey: a.store.CurseForgeKey(),
-		CacheDir:      cacheDir,
-		Skipped:       func(key string) bool { return a.store.Skipped(root, key) },
-	})
+	out.Mods, err = pack.Recheck(context.WithoutCancel(ctx), moved, a.recheckOptions(pack.Root))
 	if err != nil {
 		logx.Printf("recheck after undo: %v", err)
 	}
@@ -657,6 +716,8 @@ func (a *App) Undo(ids []string) (*UndoResult, error) {
 	for _, r := range out.Mods {
 		undone[r.OldID] = true
 	}
+	a.post.Lock()
+	defer a.post.Unlock()
 	if a.report != nil {
 		kept := a.report.Installed[:0:0]
 		for _, x := range a.report.Installed {
@@ -669,13 +730,13 @@ func (a *App) Undo(ids []string) (*UndoResult, error) {
 	return out, nil
 }
 
-func (a *App) syncServer(pack *resolve.Pack, session *backup.Session, keys map[string]bool) *ServerSync {
+func (a *App) syncServer(ctx context.Context, client []server.Mod, mcVersion string, session *backup.Session, keys map[string]bool) *ServerSync {
 	root := a.serverRoot()
 	if root == "" {
 		return nil
 	}
-	out := &ServerSync{Root: root, Remote: server.IsRemote(root)}
-	diff, err := server.Compare(pack, root)
+	out := &ServerSync{Root: root, Remote: fsx.IsRemote(root)}
+	diff, err := server.Compare(client, mcVersion, root)
 	if err == nil {
 		if keys != nil {
 			diff.Only(keys)
@@ -683,7 +744,7 @@ func (a *App) syncServer(pack *resolve.Pack, session *backup.Session, keys map[s
 		if len(diff.Items) == 0 {
 			return nil
 		}
-		out.Results, err = server.Sync(diff, session, pack.MCVersion)
+		out.Results, err = server.Sync(ctx, diff, session, mcVersion)
 	}
 	if err != nil {
 		out.Error = err.Error()
@@ -700,9 +761,7 @@ func (a *App) ServerBehind() (int, error) {
 	if pack == nil || root == "" {
 		return 0, nil
 	}
-	a.post.Lock()
-	defer a.post.Unlock()
-	diff, err := server.Compare(pack, root)
+	diff, err := server.Compare(server.Snapshot(pack), pack.MCVersion, root)
 	if err != nil {
 		return 0, err
 	}
@@ -716,7 +775,8 @@ func (a *App) SyncServer() (*ServerSync, error) {
 	if pack == nil {
 		return nil, errors.New("no pack loaded")
 	}
-	if _, err := a.begin(); err != nil {
+	ctx, err := a.begin()
+	if err != nil {
 		return nil, err
 	}
 	defer a.end()
@@ -725,7 +785,7 @@ func (a *App) SyncServer() (*ServerSync, error) {
 		return nil, err
 	}
 	session := backup.Begin(dir, pack.Root)
-	out := a.syncServer(pack, session, nil)
+	out := a.syncServer(ctx, server.Snapshot(pack), pack.MCVersion, session, nil)
 	if err := session.Save(); err != nil {
 		logx.Printf("backup session not saved: %v", err)
 	}
@@ -735,27 +795,6 @@ func (a *App) SyncServer() (*ServerSync, error) {
 	return out, nil
 }
 
-func markInstalled(pack *resolve.Pack, m *resolve.Mod) {
-	if m == nil || m.Target == nil {
-		return
-	}
-	m.Path = filepath.Join(filepath.Dir(m.Path), m.Target.FileName)
-	m.FileName = m.Target.FileName
-	m.Version = m.Target.Version
-	m.Status = resolve.StatusCurrent
-	m.Reason = ""
-	m.Target = nil
-	j, err := jarinfo.Read(m.Path)
-	if err != nil {
-		logx.Printf("%s: cannot read the installed jar: %v", m.FileName, err)
-		return
-	}
-	m.Jar, m.Size = j, j.Size
-	for _, id := range j.ModIDs {
-		pack.ModIDs[strings.ToLower(id)] = true
-	}
-}
-
 func (a *App) Changelog(id string) (string, error) {
 	a.mu.Lock()
 	pack := a.pack
@@ -763,8 +802,6 @@ func (a *App) Changelog(id string) (string, error) {
 	if pack == nil {
 		return "", errors.New("no pack loaded")
 	}
-	a.post.Lock()
-	defer a.post.Unlock()
 	return pack.Changelog(a.ctx, id, a.store.CurseForgeKey())
 }
 

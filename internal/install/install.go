@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/blackkriger/modhound/internal/backup"
+	"github.com/blackkriger/modhound/internal/fsx"
 	"github.com/blackkriger/modhound/internal/httpx"
 	"github.com/blackkriger/modhound/internal/jarinfo"
 	"github.com/blackkriger/modhound/internal/logx"
@@ -267,7 +268,7 @@ func one(ctx context.Context, pack *resolve.Pack, m *resolve.Mod, session *backu
 
 func replaceKeeping(session *backup.Session, m *resolve.Mod, part, dest string) error {
 	item := backup.Item{Key: m.Key, Name: m.Name, Dir: filepath.Dir(m.Path), OldFile: m.FileName, NewFile: m.Target.FileName, From: m.Version, To: m.Target.Version}
-	undo, err := session.Keep(m.Path, &item)
+	undo, err := session.Keep(fsx.Local, m.Path, "", &item)
 	if err != nil {
 		return fmt.Errorf("cannot move the old file (is the game running?): %w", err)
 	}

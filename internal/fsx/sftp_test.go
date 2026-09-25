@@ -1,4 +1,4 @@
-package server
+package fsx
 
 import "testing"
 
@@ -25,10 +25,7 @@ func TestParseTarget(t *testing.T) {
 			t.Fatalf("%q does not survive String(): %+v", in, again)
 		}
 	}
-	if got := (Target{Path: "/srv/mods"}).modsDir(); got != "/srv/mods" {
-		t.Fatalf("modsDir = %q", got)
-	}
-	if got := (Target{Path: "/srv"}).backupDir("s1"); got != "/srv/modhound-backups/s1" {
-		t.Fatalf("backupDir = %q", got)
+	if got := (Target{}).Root(); got != "." {
+		t.Fatalf("Root = %q", got)
 	}
 }

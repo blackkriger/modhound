@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/blackkriger/modhound/internal/curseforge"
+	"github.com/blackkriger/modhound/internal/fsx"
 	"github.com/blackkriger/modhound/internal/gtnh"
 	"github.com/blackkriger/modhound/internal/httpx"
 	"github.com/blackkriger/modhound/internal/icons"
@@ -77,6 +78,8 @@ type Mod struct {
 	notes       notes
 	mr          *mrState
 	gt          *gtnh.Hit
+	choices     map[string]choice
+	chosen      bool
 }
 
 type ModDebug struct {
@@ -142,23 +145,23 @@ func cleanNotes(s string) string {
 }
 
 func (p *Pack) Changelog(ctx context.Context, id, curseForgeKey string) (string, error) {
-	var m *Mod
-	for _, x := range p.Mods {
-		if x.ID == id {
-			m = x
-		}
-	}
+	m := p.find(id)
 	if m == nil {
 		return "", errors.New("mod not found")
 	}
-	text := m.notes.text
-	if text == "" && m.notes.cfFile != 0 && curseForgeKey != "" {
-		raw, err := (&curseforge.Client{Key: curseForgeKey}).Changelog(ctx, m.notes.cfMod, m.notes.cfFile)
+	p.mu.Lock()
+	n := m.notes
+	p.mu.Unlock()
+	text := n.text
+	if text == "" && n.cfFile != 0 && curseForgeKey != "" {
+		raw, err := (&curseforge.Client{Key: curseForgeKey}).Changelog(ctx, n.cfMod, n.cfFile)
 		if err != nil {
 			return "", err
 		}
 		text = plainText(raw)
+		p.mu.Lock()
 		m.notes.text = text
+		p.mu.Unlock()
 	}
 	text = cleanNotes(text)
 	if len(text) > maxNotes {
@@ -205,44 +208,8 @@ func (o *Options) progress(stage string, done, total int) {
 	}
 }
 
-var mcVersionRe = regexp.MustCompile(`^\d+\.\d+(\.\d+)?$`)
-
 func FindModsDir(root string) (string, error) {
-	if strings.EqualFold(filepath.Base(root), "mods") {
-		return root, nil
-	}
-	dir := filepath.Join(root, "mods")
-	if st, err := os.Stat(dir); err == nil && st.IsDir() {
-		return dir, nil
-	}
-	return "", fmt.Errorf("no mods folder in %s", root)
-}
-
-func listJars(modsDir string) ([]string, error) {
-	var out []string
-	add := func(dir string) error {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return err
-		}
-		for _, e := range entries {
-			name := strings.ToLower(e.Name())
-			if !e.IsDir() && (strings.HasSuffix(name, ".jar") || strings.HasSuffix(name, ".zip")) {
-				out = append(out, filepath.Join(dir, e.Name()))
-			}
-		}
-		return nil
-	}
-	if err := add(modsDir); err != nil {
-		return nil, err
-	}
-	entries, _ := os.ReadDir(modsDir)
-	for _, e := range entries {
-		if e.IsDir() && mcVersionRe.MatchString(e.Name()) {
-			add(filepath.Join(modsDir, e.Name()))
-		}
-	}
-	return out, nil
+	return fsx.ModsDir(fsx.Local, root)
 }
 
 func Check(ctx context.Context, root string, opts Options) (*Pack, error) {
@@ -251,7 +218,7 @@ func Check(ctx context.Context, root string, opts Options) (*Pack, error) {
 	if err != nil {
 		return nil, err
 	}
-	paths, err := listJars(modsDir)
+	paths, err := fsx.ListJars(fsx.Local, modsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -543,7 +510,7 @@ func detectMCVersion(mods []*Mod, modsDir string) string {
 	}
 	entries, _ := os.ReadDir(modsDir)
 	for _, e := range entries {
-		if e.IsDir() && mcVersionRe.MatchString(e.Name()) {
+		if e.IsDir() && fsx.IsVersionDir(e.Name()) {
 			counts[e.Name()] += 10
 		}
 	}

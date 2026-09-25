@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -133,6 +134,13 @@ func (s *Store) Get() Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.cfg
+	c.Sort = maps.Clone(s.cfg.Sort)
+	c.Packs = make(map[string]*Pack, len(s.cfg.Packs))
+	for k, p := range s.cfg.Packs {
+		cp := *p
+		cp.Skip = slices.Clone(p.Skip)
+		c.Packs[k] = &cp
+	}
 	return c
 }
 

@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blackkriger/modhound/internal/fsx"
+	"github.com/blackkriger/modhound/internal/logx"
+	"github.com/blackkriger/modhound/internal/resolve"
 )
 
 type Item struct {
@@ -29,12 +32,17 @@ type Item struct {
 	Remote   string `json:"remote,omitempty"`
 }
 
-type RemoteStore interface {
-	Restore(it Item) error
-	Remove(it Item) error
+func (it Item) files() (fsx.FS, error) {
+	if it.Remote == "" {
+		return fsx.Local, nil
+	}
+	f, _, err := fsx.Open(it.Remote)
+	return f, err
 }
 
-var Remote RemoteStore
+func (it Item) chain(file string) string {
+	return it.Remote + "|" + strings.ToLower(it.Dir) + "|" + strings.ToLower(file)
+}
 
 type Session struct {
 	ID    string `json:"id"`
@@ -56,6 +64,13 @@ func (s *Session) Pending() []Item {
 	return out
 }
 
+func (s *Session) storedPath(it Item) string {
+	if it.Remote != "" {
+		return it.Stored
+	}
+	return filepath.Join(s.dir, it.Stored)
+}
+
 func packDir(root, pack string) string {
 	sum := sha1.Sum([]byte(strings.ToLower(filepath.Clean(pack))))
 	return filepath.Join(root, hex.EncodeToString(sum[:6]))
@@ -67,31 +82,37 @@ func Begin(root, pack string) *Session {
 	return &Session{ID: id, Time: now.Format(time.DateTime), Pack: pack, dir: filepath.Join(packDir(root, pack), id)}
 }
 
-func (s *Session) Keep(oldPath string, item *Item) (func() error, error) {
+func (s *Session) Keep(f fsx.FS, oldPath, store string, item *Item) (func() error, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if store == "" {
+		store = s.dir
+	}
+	if err := f.MkdirAll(store); err != nil {
 		return nil, err
 	}
-	stored := filepath.Join(s.dir, item.OldFile)
-	for n := 1; ; n++ {
-		if _, err := os.Stat(stored); err != nil {
-			break
-		}
-		stored = filepath.Join(s.dir, fmt.Sprintf("%d-%s", n, item.OldFile))
+	stored := f.Join(store, item.OldFile)
+	for n := 1; f.Exists(stored); n++ {
+		stored = f.Join(store, fmt.Sprintf("%d-%s", n, item.OldFile))
 	}
-	if err := move(oldPath, stored); err != nil {
+	if err := f.Rename(oldPath, stored); err != nil {
 		return nil, err
 	}
-	item.Stored = filepath.Base(stored)
-	return func() error { return move(stored, oldPath) }, nil
+	item.Remote = f.Remote()
+	item.Stored = stored
+	if item.Remote == "" {
+		item.Stored = filepath.Base(stored)
+	}
+	return func() error { return f.Rename(stored, oldPath) }, nil
 }
 
 func (s *Session) Add(item Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Items = append(s.Items, item)
-	s.write()
+	if err := s.write(); err != nil {
+		logx.Printf("backup record of %s not written: %v", item.OldFile, err)
+	}
 }
 
 func (s *Session) Save() error {
@@ -123,23 +144,13 @@ func (s *Session) write() error {
 	return os.Rename(path+".tmp", path)
 }
 
-func (s *Session) MarkRestored(key, newFile string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.Items {
-		if s.Items[i].Key == key && s.Items[i].NewFile == newFile {
-			s.Items[i].Restored = true
-		}
-	}
-}
-
 func prune(dir, newest string) {
 	sessions := load(dir)
-	taken := map[string]bool{}
+	replaced := map[string]bool{}
 	for _, s := range sessions {
 		if s.ID == newest {
 			for _, it := range s.Items {
-				taken[it.Key] = true
+				replaced[it.chain(it.OldFile)] = true
 			}
 		}
 	}
@@ -150,14 +161,17 @@ func prune(dir, newest string) {
 		changed := false
 		kept := s.Items[:0]
 		for _, it := range s.Items {
-			if it.Restored || taken[it.Key] {
-				if it.Remote == "" {
-					os.Remove(filepath.Join(s.dir, it.Stored))
-				} else if Remote != nil && !it.Restored {
-					Remote.Remove(it)
-				}
+			if it.Restored {
 				changed = true
 				continue
+			}
+			if replaced[it.chain(it.NewFile)] {
+				if err := s.discard(it); err != nil {
+					logx.Printf("old backup %s not removed, kept for later: %v", it.Stored, err)
+				} else {
+					changed = true
+					continue
+				}
 			}
 			kept = append(kept, it)
 		}
@@ -168,6 +182,24 @@ func prune(dir, newest string) {
 			s.write()
 		}
 	}
+}
+
+func (s *Session) discard(it Item) error {
+	f, err := it.files()
+	if err != nil {
+		return err
+	}
+	stored := s.storedPath(it)
+	if !f.Exists(stored) {
+		return nil
+	}
+	if err := f.Remove(stored); err != nil {
+		return err
+	}
+	if it.Remote != "" {
+		f.RemoveEmptyDir(f.Dir(stored))
+	}
+	return nil
 }
 
 func load(dir string) []*Session {
@@ -203,37 +235,9 @@ func All(root, pack string) []*Session {
 	return out
 }
 
-func move(src, dst string) error {
-	if err := os.Rename(src, dst); err == nil {
-		return nil
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	out, err := os.Create(dst)
-	if err != nil {
-		in.Close()
-		return err
-	}
-	_, err = io.Copy(out, in)
-	in.Close()
-	if cerr := out.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		os.Remove(dst)
-		return err
-	}
-	if err := os.Remove(src); err != nil {
-		os.Remove(dst)
-		return err
-	}
-	return nil
-}
-
 func (s *Session) Restore(keys map[string]bool) []Result {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	var results []Result
 	for i := range s.Items {
 		it := &s.Items[i]
@@ -249,6 +253,9 @@ func (s *Session) Restore(keys map[string]bool) []Result {
 		}
 		results = append(results, res)
 	}
+	if len(results) == 0 {
+		return nil
+	}
 	if err := s.write(); err != nil {
 		for i := range results {
 			if results[i].OK {
@@ -256,7 +263,6 @@ func (s *Session) Restore(keys map[string]bool) []Result {
 			}
 		}
 	}
-	s.mu.Unlock()
 	return results
 }
 
@@ -274,33 +280,51 @@ type Result struct {
 }
 
 func (s *Session) restore(it Item) error {
-	if it.Remote != "" {
-		if Remote == nil {
-			return errors.New("remote servers are not available")
-		}
-		return Remote.Restore(it)
+	f, err := it.files()
+	if err != nil {
+		return err
 	}
-	stored := filepath.Join(s.dir, it.Stored)
-	if _, err := os.Stat(stored); err != nil {
+	stored := s.storedPath(it)
+	if !f.Exists(stored) {
 		return errors.New("the saved copy is missing")
 	}
-	current := filepath.Join(it.Dir, it.NewFile)
-	original := filepath.Join(it.Dir, it.OldFile)
-	if !strings.EqualFold(current, original) {
-		if _, err := os.Stat(original); err == nil {
-			return fmt.Errorf("%s already exists", filepath.Base(original))
+	current := f.Join(it.Dir, it.NewFile)
+	original := f.Join(it.Dir, it.OldFile)
+	if !strings.EqualFold(current, original) && f.Exists(original) {
+		return fmt.Errorf("%s already exists", it.OldFile)
+	}
+	if !f.Exists(current) {
+		if other := otherVersion(f, it); other != "" {
+			return fmt.Errorf("%s is in the folder now, restoring %s would leave two versions of the mod", other, it.OldFile)
 		}
 	}
 	aside := current + ".modhound-undo"
-	if _, err := os.Stat(current); err == nil {
-		if err := os.Rename(current, aside); err != nil {
+	if f.Exists(current) {
+		if err := f.Rename(current, aside); err != nil {
 			return fmt.Errorf("cannot remove the new file (is the game running?): %w", err)
 		}
 	}
-	if err := move(stored, original); err != nil {
-		os.Rename(aside, current)
+	if err := f.Rename(stored, original); err != nil {
+		f.Rename(aside, current)
 		return fmt.Errorf("cannot put the old file back: %w", err)
 	}
-	os.Remove(aside)
+	f.Remove(aside)
+	if it.Remote != "" {
+		f.RemoveEmptyDir(f.Dir(stored))
+	}
 	return nil
+}
+
+func otherVersion(f fsx.FS, it Item) string {
+	entries, err := f.ReadDir(it.Dir)
+	if err != nil {
+		return ""
+	}
+	stem := resolve.Stem(it.OldFile)
+	for _, e := range entries {
+		if !e.Dir && fsx.IsJar(e.Name) && !strings.EqualFold(e.Name, it.OldFile) && resolve.Stem(e.Name) == stem {
+			return e.Name
+		}
+	}
+	return ""
 }

@@ -30,6 +30,10 @@ export function ChooseServer() {
   return window['go']['main']['App']['ChooseServer']();
 }
 
+export function ChooseVersion(arg1, arg2) {
+  return window['go']['main']['App']['ChooseVersion'](arg1, arg2);
+}
+
 export function DefaultPack() {
   return window['go']['main']['App']['DefaultPack']();
 }
@@ -100,4 +104,12 @@ export function Undo(arg1) {
 
 export function Update(arg1, arg2) {
   return window['go']['main']['App']['Update'](arg1, arg2);
+}
+
+export function VersionNotes(arg1, arg2) {
+  return window['go']['main']['App']['VersionNotes'](arg1, arg2);
+}
+
+export function Versions(arg1) {
+  return window['go']['main']['App']['Versions'](arg1);
 }

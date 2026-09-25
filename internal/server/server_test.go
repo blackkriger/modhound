@@ -2,6 +2,7 @@ package server
 
 import (
 	"archive/zip"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -65,7 +66,7 @@ func TestCompareAndSync(t *testing.T) {
 	writeJar(t, filepath.Join(client, "ClientOnly-1.0.jar"), "clientonly", "x")
 
 	pack := clientPack(t, client)
-	diff, err := Compare(pack, filepath.Join(base, "server"))
+	diff, err := Compare(Snapshot(pack), pack.MCVersion, filepath.Join(base, "server"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,7 @@ func TestCompareAndSync(t *testing.T) {
 
 	backups := filepath.Join(base, "backups")
 	session := backup.Begin(backups, pack.Root)
-	results, err := Sync(diff, session, pack.MCVersion)
+	results, err := Sync(context.Background(), diff, session, pack.MCVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func TestCompareAndSync(t *testing.T) {
 		}
 	}
 
-	if again, _ := Compare(pack, filepath.Join(base, "server")); len(again.Items) != 0 {
+	if again, _ := Compare(Snapshot(pack), pack.MCVersion, filepath.Join(base, "server")); len(again.Items) != 0 {
 		t.Fatalf("server still behind after sync: %+v", again.Items)
 	}
 
@@ -146,7 +147,7 @@ func TestSyncRefusesLockedFiles(t *testing.T) {
 	old := filepath.Join(srv, "AppleCore-3.3.10.jar")
 	writeJar(t, old, "applecore", "old")
 	pack := clientPack(t, client)
-	diff, err := Compare(pack, filepath.Join(base, "server"))
+	diff, err := Compare(Snapshot(pack), pack.MCVersion, filepath.Join(base, "server"))
 	if err != nil || len(diff.Items) != 1 {
 		t.Fatalf("diff %v %v", diff, err)
 	}
@@ -158,7 +159,7 @@ func TestSyncRefusesLockedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if _, err := Sync(diff, backup.Begin(filepath.Join(base, "backups"), pack.Root), pack.MCVersion); err != ErrInUse {
+	if _, err := Sync(context.Background(), diff, backup.Begin(filepath.Join(base, "backups"), pack.Root), pack.MCVersion); err != ErrInUse {
 		t.Fatalf("err = %v, want ErrInUse", err)
 	}
 	if _, err := os.Stat(old); err != nil {
