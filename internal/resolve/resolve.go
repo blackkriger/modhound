@@ -180,17 +180,17 @@ type mrState struct {
 }
 
 type Pack struct {
-	Root          string          `json:"root"`
-	ModsDir       string          `json:"modsDir"`
-	MCVersion     string          `json:"mcVersion"`
-	Loader        string          `json:"loader"`
-	Mods          []*Mod          `json:"mods"`
-	Warnings      []string        `json:"warnings"`
-	CurseForgeOK  bool            `json:"curseforgeOk"`
-	ModIDs        map[string]bool `json:"-"`
-	MaxClassMajor int             `json:"-"`
+	Root          string   `json:"root"`
+	ModsDir       string   `json:"modsDir"`
+	MCVersion     string   `json:"mcVersion"`
+	Loader        string   `json:"loader"`
+	Mods          []*Mod   `json:"mods"`
+	Warnings      []string `json:"warnings"`
+	CurseForgeOK  bool     `json:"curseforgeOk"`
+	MaxClassMajor int      `json:"-"`
 
-	mu sync.Mutex
+	mu      sync.Mutex
+	catalog *gtnh.Catalog
 }
 
 type Options struct {
@@ -228,14 +228,6 @@ func Check(ctx context.Context, root string, opts Options) (*Pack, error) {
 		return nil, err
 	}
 	pack.MCVersion = detectMCVersion(pack.Mods, modsDir)
-	pack.ModIDs = map[string]bool{}
-	for _, m := range pack.Mods {
-		if m.Jar != nil {
-			for _, id := range m.Jar.ModIDs {
-				pack.ModIDs[strings.ToLower(id)] = true
-			}
-		}
-	}
 	logx.Printf("check %s: mods folder %s, %d files, Minecraft %s, loader %s, curseforge key set %v", root, modsDir, len(pack.Mods), pack.MCVersion, pack.Loader, opts.CurseForgeKey != "")
 	if logx.Enabled() {
 		for _, m := range pack.Mods {
@@ -252,6 +244,7 @@ func Check(ctx context.Context, root string, opts Options) (*Pack, error) {
 	}
 
 	r := identify(ctx, pack, pack.Mods, &opts)
+	pack.catalog = r.catalog
 	r.resolveAll(ctx, pack.Mods)
 	r.describeMissingDeps(ctx, pack.Mods, pack.Mods)
 	if logx.Enabled() {
@@ -418,7 +411,7 @@ type Replaced struct {
 
 func (p *Pack) Recheck(ctx context.Context, moved map[string]string, opts Options) ([]Replaced, error) {
 	byPath := map[string]*Mod{}
-	for _, m := range p.Mods {
+	for _, m := range p.List() {
 		byPath[strings.ToLower(m.Path)] = m
 	}
 	var paths []string
@@ -433,7 +426,7 @@ func (p *Pack) Recheck(ctx context.Context, moved map[string]string, opts Option
 		return nil, nil
 	}
 	mods := readJars(ctx, paths, p.ModsDir, &opts)
-	scope := &Pack{Root: p.Root, ModsDir: p.ModsDir, Loader: p.Loader, MCVersion: p.MCVersion, ModIDs: p.ModIDs, MaxClassMajor: p.MaxClassMajor, Mods: mods}
+	scope := &Pack{Root: p.Root, ModsDir: p.ModsDir, Loader: p.Loader, MCVersion: p.MCVersion, MaxClassMajor: p.MaxClassMajor, Mods: mods}
 	r := identify(ctx, scope, mods, &opts)
 	r.resolveAll(ctx, mods)
 	out := make([]Replaced, len(mods))
@@ -449,11 +442,36 @@ func (p *Pack) Recheck(ctx context.Context, moved map[string]string, opts Option
 		}
 	}
 	p.mu.Unlock()
-	r.describeMissingDeps(ctx, mods, p.Mods)
+	r.describeMissingDeps(ctx, mods, p.List())
 	for _, w := range scope.Warnings {
 		logx.Printf("recheck: %s", w)
 	}
 	return out, ctx.Err()
+}
+
+func (p *Pack) Add(ctx context.Context, path string, opts Options) *Mod {
+	mods := readJars(ctx, []string{path}, p.ModsDir, &opts)
+	scope := &Pack{Root: p.Root, ModsDir: p.ModsDir, Loader: p.Loader, MCVersion: p.MCVersion, MaxClassMajor: p.MaxClassMajor, Mods: mods}
+	r := identify(ctx, scope, mods, &opts)
+	r.resolveAll(ctx, mods)
+	m := mods[0]
+	p.mu.Lock()
+	p.Mods = append(p.Mods, m)
+	p.mu.Unlock()
+	r.describeMissingDeps(ctx, mods, p.List())
+	return m
+}
+
+func (p *Pack) Remove(path string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, m := range p.Mods {
+		if strings.EqualFold(m.Path, path) {
+			p.Mods = slices.Delete(p.Mods, i, i+1)
+			return m.ID
+		}
+	}
+	return ""
 }
 
 func (p *Pack) warn(format string, args ...any) {

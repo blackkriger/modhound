@@ -13,6 +13,8 @@ import (
 const (
 	baseURL       = "https://api.curseforge.com/v1"
 	minecraftGame = 432
+	classMods     = 6
+	loaderForge   = 1
 
 	ReleaseTypeRelease = 1
 
@@ -172,4 +174,19 @@ func (c *Client) File(ctx context.Context, modID, fileID int) (*File, error) {
 		return nil, err
 	}
 	return &resp.Data, nil
+}
+
+func (c *Client) Search(ctx context.Context, query, gameVersion string) ([]Mod, error) {
+	q := url.Values{}
+	q.Set("gameId", fmt.Sprint(minecraftGame))
+	q.Set("classId", fmt.Sprint(classMods))
+	q.Set("gameVersion", gameVersion)
+	q.Set("modLoaderType", fmt.Sprint(loaderForge))
+	q.Set("searchFilter", query)
+	q.Set("pageSize", "20")
+	var resp struct {
+		Data []Mod `json:"data"`
+	}
+	err := c.do(ctx, http.MethodGet, "/mods/search?"+q.Encode(), nil, &resp)
+	return resp.Data, err
 }

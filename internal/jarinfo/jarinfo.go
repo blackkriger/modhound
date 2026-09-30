@@ -25,6 +25,7 @@ type ModInfo struct {
 	Authors     StringList `json:"authors"`
 	LogoFile    string     `json:"logoFile"`
 	Required    StringList `json:"requiredMods"`
+	UseDeps     bool       `json:"useDependencyInformation"`
 }
 
 type StringList []string
@@ -47,17 +48,18 @@ func (l *StringList) UnmarshalJSON(b []byte) error {
 }
 
 type Jar struct {
-	Size       int64
-	SHA1       string
-	SHA512     string
-	Murmur2    uint32
-	Info       *ModInfo
-	Logo       []byte
-	LogoType   string
-	ModIDs     []string
-	Requires   []string
-	ClassMajor int
-	Valid      bool
+	Size         int64
+	SHA1         string
+	SHA512       string
+	Murmur2      uint32
+	Info         *ModInfo
+	Logo         []byte
+	LogoType     string
+	ModIDs       []string
+	Requires     []string
+	DeclaresDeps []string
+	ClassMajor   int
+	Valid        bool
 }
 
 const maxLogoSize = 1 << 20
@@ -112,7 +114,10 @@ func parse(data []byte, withSHA512 bool) *Jar {
 			if mi.ModID != "" {
 				j.ModIDs = append(j.ModIDs, mi.ModID)
 			}
-			j.Requires = append(j.Requires, mi.Required...)
+			if mi.UseDeps && mi.ModID != "" {
+				j.Requires = append(j.Requires, mi.Required...)
+				j.DeclaresDeps = append(j.DeclaresDeps, strings.ToLower(mi.ModID))
+			}
 		}
 	}
 	if j.Info != nil && j.Info.LogoFile != "" {

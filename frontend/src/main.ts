@@ -1,8 +1,8 @@
 import './modhound.css';
 import './app.css';
 
-import {ApplyAppUpdate, Changelog, Check, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, ChooseVersion, DefaultPack, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update, VersionNotes, Versions} from '../wailsjs/go/main/App';
-import {main, resolve} from '../wailsjs/go/models';
+import {ApplyAppUpdate, Changelog, Check, Compat, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, ChooseVersion, DefaultPack, FindMissing, InstallMissing, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update, VersionNotes, Versions} from '../wailsjs/go/main/App';
+import {compat, main, resolve} from '../wailsjs/go/models';
 import {ClipboardSetText, EventsOn, Quit, WindowMinimise} from '../wailsjs/runtime/runtime';
 
 type Mode = 'empty' | 'ready' | 'checking' | 'installing' | 'report';
@@ -52,6 +52,9 @@ const state = {
     kindsOn: {up: true, upd: true, need: true, nf: true, sk: true, cur: false} as Record<Kind, boolean>,
     unchecked: new Set<string>(),
     undoPicked: new Set<string>(),
+    problems: [] as compat.Problem[],
+    offers: new Map<string, resolve.Offer | null | undefined>(),
+    adding: [] as string[],
     versions: new Map<string, resolve.Choice[] | string>(),
     versionsOpen: '',
     versionsAll: false,
@@ -217,8 +220,9 @@ function kindOf(m: resolve.Mod): Kind {
     if (m.skipped) return 'sk';
     if (m.status === 'update') return 'up';
     if (isNeed(m)) return 'need';
-    if (m.status === 'current') return undoItem(m.key, m.fileName) ? 'upd' : 'cur';
-    return 'nf';
+    if (m.status === 'current' && undoItem(m.key, m.fileName)) return 'upd';
+    if (hasSevere(m)) return 'need';
+    return m.status === 'current' ? 'cur' : 'nf';
 }
 
 function glyphOf(m: resolve.Mod): string {
@@ -242,6 +246,124 @@ function selectedUpdates(): resolve.Mod[] {
 
 function hasKey(): boolean {
     return !!state.settings?.curseforgeKey;
+}
+
+let problemIndex: { src: unknown; own: Map<string, compat.Problem[]>; caused: Map<string, compat.Problem[]> } = {src: null, own: new Map(), caused: new Map()};
+
+function problemsOf(m: resolve.Mod): { own: compat.Problem[]; caused: compat.Problem[] } {
+    if (problemIndex.src !== state.problems) {
+        const own = new Map<string, compat.Problem[]>();
+        const caused = new Map<string, compat.Problem[]>();
+        for (const p of state.problems) {
+            own.set(p.jar, [...(own.get(p.jar) ?? []), p]);
+            if (p.kind === 'api') caused.set(p.cause, [...(caused.get(p.cause) ?? []), p]);
+        }
+        problemIndex = {src: state.problems, own, caused};
+    }
+    const file = installedFile(m);
+    return {own: problemIndex.own.get(file) ?? [], caused: problemIndex.caused.get(file) ?? []};
+}
+
+function hasSevere(m: resolve.Mod): boolean {
+    const {own, caused} = problemsOf(m);
+    return own.some(p => p.severe) || caused.some(p => p.severe);
+}
+
+function modName(file: string): string {
+    for (const m of state.mods.values()) {
+        if (installedFile(m) === file) return m.name;
+    }
+    return file;
+}
+
+function problemNote(m: resolve.Mod): { text: string; severe: boolean } {
+    const {own, caused} = problemsOf(m);
+    const first = own.find(p => p.severe) ?? own[0];
+    if (first?.kind === 'api') return {text: first.severe ? `incompatible with ${modName(first.cause)}` : `may not work with ${modName(first.cause)}`, severe: first.severe};
+    if (first?.kind === 'jvmdg') return {text: 'needs JvmDowngrader classes', severe: true};
+    if (first?.kind === 'missing') return {text: `requires ${first.cause}`, severe: true};
+    const severe = caused.filter(p => p.severe).length;
+    if (severe) return {text: `breaks ${severe} ${plural(severe, 'mod', 'mods')}`, severe: true};
+    if (caused.length) return {text: `may break ${caused.length} ${plural(caused.length, 'mod', 'mods')}`, severe: false};
+    return {text: '', severe: false};
+}
+
+function listed(details: string[]): string {
+    const shown = details.slice(0, 6).join(', ');
+    return details.length > 6 ? `${shown} and ${details.length - 6} more` : shown;
+}
+
+function problemsHTML(m: resolve.Mod): string {
+    const {own, caused} = problemsOf(m);
+    if (!own.length && !caused.length) return '';
+    const lines: [string, boolean, string][] = [
+        ...own.map((p): [string, boolean, string] => {
+            if (p.kind === 'api') return [`Uses ${listed(p.details)}, which ${modName(p.cause)} does not have.`, p.severe, ''];
+            if (p.kind === 'jvmdg') return [p.cause ? `Needs ${listed(p.details)}, which ${p.cause} does not have.` : 'Needs the JvmDowngrader runtime, which no mod in the modpack provides.', true, ''];
+            return [`Requires ${p.cause}, which is not in the modpack.`, true, offerHTML(p.cause)];
+        }),
+        ...caused.map((p): [string, boolean, string] => [`${modName(p.jar)} uses ${listed(p.details)}, which this version does not have.`, p.severe, '']),
+    ];
+    lines.sort((a, b) => Number(b[1]) - Number(a[1]));
+    return `<div class="m3-notes"><span class="m3-eyebrow">Take notice</span>${lines.map(([l, severe, offer]) => `<p class="m3-reason ${severe ? 'm3-bad' : 'is-muted'}">${esc(l)}</p>${offer ? `<p class="m3-reason">${offer}</p>` : ''}`).join('')}</div>`;
+}
+
+function offerHTML(modId: string): string {
+    if (!state.offers.has(modId)) findOffer(modId);
+    const offer = state.offers.get(modId);
+    if (!offer?.target) return '';
+    const label = `${offer.name} ${offer.target.version}`;
+    return state.adding.includes(modId)
+        ? `<a href="#" class="m3-file is-busy">Installing ${esc(label)}…</a>`
+        : `<a href="#" class="m3-file${busyOps() ? ' is-off' : ''}" data-install="${esc(modId)}">Install ${esc(label)}</a>`;
+}
+
+async function findOffer(modId: string) {
+    if (state.offers.has(modId)) return;
+    state.offers.set(modId, undefined);
+    const offers = state.offers;
+    let offer: resolve.Offer | null = null;
+    try {
+        offer = await FindMissing(modId);
+    } catch {
+        setTimeout(() => offers.delete(modId), 30000);
+    }
+    if (offers !== state.offers) return;
+    offers.set(modId, offer);
+    if (offer) renderInspector();
+}
+
+async function installMissing(modId: string) {
+    if (state.adding.includes(modId) || busyOps() || state.mode === 'checking') return;
+    state.adding = [...state.adding, modId];
+    renderInspector();
+    try {
+        const mod = await InstallMissing(modId);
+        state.mods.set(mod.id, mod);
+        modsChanged();
+        state.notice = `added ${mod.name}`;
+    } catch (e) {
+        state.error = String(e);
+    }
+    state.adding = state.adding.filter(id => id !== modId);
+    state.lastUpdate = await LastUpdate().catch(() => null);
+    render();
+    refreshCompat();
+}
+
+let compatSeq = 0;
+
+async function refreshCompat() {
+    const seq = ++compatSeq;
+    let problems: compat.Problem[] = [];
+    try {
+        problems = (await Compat()) ?? [];
+    } catch {
+        problems = [];
+    }
+    if (seq !== compatSeq) return;
+    state.problems = problems;
+    if (state.mode === 'ready' || state.mode === 'report') render();
 }
 
 function matchesQuery(m: resolve.Mod): boolean {
@@ -331,6 +453,8 @@ function rowHTML({m, as}: Row): string {
         note = '<span class="m3-note is-busy">updating…</span>';
     }
     const section = st === 'update' ? 'updates' : st === 'need' ? 'need you' : '';
+    const problem = ['queued', 'downloading', 'failed'].includes(st) ? null : problemNote(m);
+    if (problem?.text && (problem.severe ? !note.includes('m3-note--bad') : !note)) note = `<span class="m3-note${problem.severe ? ' m3-note--bad' : ''}">${esc(problem.text)}</span>`;
     if (!note && section && state.sort[section] === 'date' && m.target?.date) note = `<span class="m3-note">${esc(releaseDate(m.target.date))}</span>`;
     const busy = state.mode === 'checking' || state.mode === 'installing';
     const undoRow = st === 'done' && state.mode !== 'installing' && canPickUndo(m);
@@ -406,19 +530,19 @@ function renderChanges() {
         const skipped = rest.filter(m => kindOf(m) === 'sk');
         const nf = rest.filter(m => kindOf(m) === 'nf');
         sections = [
+            ['need you', need.map(m => ({m}))],
             ['updates', left.map(m => ({m, as: live.get(m.id)?.state}))],
             ['failed', mods.filter(m => failedIds.has(m.id)).map(m => ({m, as: 'failed'}))],
             ['updated', mods.filter(m => doneIds.has(m.id) || (!failedIds.has(m.id) && kindOf(m) === 'upd')).map(m => ({m, as: 'done'}))],
-            ['need you', need.map(m => ({m}))],
             ['not found', nf.map(m => ({m}))],
             ['skipped', skipped.map(m => ({m, as: 'skipped'}))],
         ];
     } else {
         const q = !!state.q.trim();
         const defs: [Kind, string, string, string][] = [
+            ['need', '!', 'm3-g--bad', 'need you'],
             ['up', '↑', 'm3-g--up', 'updates'],
             ['upd', '✓', 'm3-g--ok', 'updated'],
-            ['need', '!', 'm3-g--bad', 'need you'],
             ['nf', '?', '', 'not found'],
             ['sk', '–', '', 'skipped'],
             ['cur', '=', '', 'current'],
@@ -716,12 +840,13 @@ function inspectorHTML(): string {
                 ${showTo
                     ? `<span class="minus">− ${esc(sel.fileName)}</span><span class="plus">+ ${esc(t!.fileName)}</span>${t!.date ? `<span class="when">${esc(releaseDate(t!.date))}</span>` : ''}`
                     : restore
-                        ? `<span class="minus">− ${esc(restore.oldFile)}</span><span class="plus">+ ${esc(restore.newFile)}</span>${restore.time ? `<span class="when">${esc(updatedAt(restore.time))}</span>` : ''}`
+                        ? `${restore.oldFile ? `<span class="minus">− ${esc(restore.oldFile)}</span>` : ''}<span class="plus">+ ${esc(restore.newFile)}</span>${restore.time ? `<span class="when">${esc(updatedAt(restore.time))}</span>` : ''}`
                         : `<span>${esc(sel.fileName)}</span>`}
             </div>
             <p class="m3-reason">${esc(reasonText(sel))}</p>
             ${links ? `<div class="m3-links">${links}</div>` : ''}
             ${state.versionsOpen === sel.id ? versionsHTML(sel) : ''}
+            ${problemsHTML(sel)}
             ${showTo && state.mode === 'ready' ? notesHTML(sel.id) : ''}
             ${sel.debug ? techHTML(sel.debug) : ''}
         </div>
@@ -778,9 +903,9 @@ function inspectorHTML(): string {
             ${linesHTML([
                 ...(f ? [['✕', 'm3-bad', f, 'failed'] as [string, string, number, string]] : []),
                 ...(count('up') ? [['↑', '', count('up'), plural(count('up'), 'update left', 'updates left')] as [string, string, number, string]] : []),
-                ['!', 'm3-bad', r.manual?.length ?? 0, 'need you'],
-                ['?', 'm', r.unknown?.length ?? 0, 'not found'],
-                ['=', 'm', r.upToDate, 'up to date'],
+                ['!', 'm3-bad', count('need'), 'need you'],
+                ['?', 'm', count('nf'), 'not found'],
+                ['=', 'm', mods.filter(m => (kindOf(m) === 'cur' || kindOf(m) === 'upd') && !r.installed?.some(x => x.id === m.id)).length, 'up to date'],
                 ...serverLines(r.server),
             ])}
             ${r.server?.error ? `<p class="m3-reason m3-bad">${esc(r.server.error)}</p>` : ''}
@@ -804,8 +929,8 @@ function inspectorHTML(): string {
         <button type="button" class="m3-line m3-line--big" data-kind="up" aria-pressed="${on('up')}"><span class="m3-big m3-num" data-count="ready">${up}</span><span class="m3-big-l">${plural(up, 'update ready', 'updates ready')}</span></button>
         <div class="m3-split">
         <ul class="m3-lines">
-            ${count('upd') ? line('upd', '✓', '', 'updated') : ''}
             ${line('need', '!', 'm3-bad', 'need you')}
+            ${count('upd') ? line('upd', '✓', '', 'updated') : ''}
             ${line('nf', '?', 'm', 'not found')}
             ${line('sk', '–', 'm', 'skipped')}
             ${line('cur', '=', 'm', 'current')}
@@ -1036,8 +1161,12 @@ async function runCheck() {
         state.checkedAt = Date.now();
         state.lastUpdate = await LastUpdate().catch(() => null);
         state.mode = 'ready';
+        state.problems = [];
+        compatSeq++;
+        state.offers = new Map();
         reveal();
         refreshServer();
+        refreshCompat();
     } catch (e) {
         const err = String(e);
         if (err === 'stopped' && previous) {
@@ -1123,7 +1252,7 @@ function isRemote(s: string): boolean {
 }
 
 function busyOps(): boolean {
-    return state.installing > 0 || state.undoActive.length > 0;
+    return state.installing > 0 || state.undoActive.length > 0 || state.adding.length > 0;
 }
 
 function installDone(): number {
@@ -1138,13 +1267,18 @@ async function runUndo(ids: string[], mods: string[]) {
         const undo = await Undo(ids);
         const results = undo.results ?? [];
         const onServer = results.filter(r => r.ok && r.key.startsWith('server:')).length;
-        const restored = results.filter(r => r.ok).length - onServer;
+        const removed = results.filter(r => r.ok && r.added).length;
+        const restored = results.filter(r => r.ok).length - onServer - removed;
         const failed = results.filter(r => !r.ok).map(f => `${f.name} (${f.error})`);
-        state.notice = `restored ${restored} ${plural(restored, 'mod', 'mods')}${onServer ? `, ${onServer} on the server` : ''}${failed.length ? `, ${failed.length} failed: ${failed.join(', ')}` : ''}`;
+        state.notice = `${restored || !removed ? `restored ${restored} ${plural(restored, 'mod', 'mods')}` : ''}${restored && removed ? ', ' : ''}${removed ? `removed ${removed} ${plural(removed, 'mod', 'mods')}` : ''}${onServer ? `, ${onServer} on the server` : ''}${failed.length ? `, ${failed.length} failed: ${failed.join(', ')}` : ''}`;
         const undone = new Set<string>();
         for (const {oldId, mod} of undo.mods ?? []) {
-            if (!mod) continue;
             undone.add(oldId);
+            if (!mod) {
+                state.mods.delete(oldId);
+                if (state.selId === oldId) state.selId = null;
+                continue;
+            }
             state.mods.delete(oldId);
             state.mods.set(mod.id, mod);
             state.unchecked.add(mod.id);
@@ -1161,7 +1295,10 @@ async function runUndo(ids: string[], mods: string[]) {
     state.lastUpdate = await LastUpdate().catch(() => null);
     state.undoActive = state.undoActive.filter(id => !mods.includes(id));
     render();
-    if (!busyOps()) refreshServer();
+    if (!busyOps()) {
+        refreshServer();
+        refreshCompat();
+    }
 }
 
 async function refreshServer() {
@@ -1251,6 +1388,7 @@ async function runUpdate(ids: string[]) {
     render();
     enterPanel();
     refreshServer();
+    refreshCompat();
 }
 
 function closeSettings(): boolean {
@@ -1509,6 +1647,12 @@ $('insp').addEventListener('click', e => {
     if (el.closest('#sel-versions') && chosenMod) {
         e.preventDefault();
         toggleVersions(chosenMod);
+        return;
+    }
+    const missing = el.closest<HTMLElement>('[data-install]')?.dataset.install;
+    if (missing) {
+        e.preventDefault();
+        installMissing(missing);
         return;
     }
     const kind = el.closest<HTMLElement>('[data-kind]')?.dataset.kind as Kind | undefined;

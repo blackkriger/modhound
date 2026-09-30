@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	goruntime "runtime"
@@ -15,9 +19,11 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/blackkriger/modhound/internal/backup"
+	"github.com/blackkriger/modhound/internal/compat"
 	"github.com/blackkriger/modhound/internal/config"
 	"github.com/blackkriger/modhound/internal/fsx"
 	"github.com/blackkriger/modhound/internal/install"
+	"github.com/blackkriger/modhound/internal/jarinfo"
 	"github.com/blackkriger/modhound/internal/launchers"
 	"github.com/blackkriger/modhound/internal/logx"
 	"github.com/blackkriger/modhound/internal/opener"
@@ -43,6 +49,15 @@ type App struct {
 	ops       int
 	opsCtx    context.Context
 	opsCancel context.CancelFunc
+
+	compatMu     sync.Mutex
+	compatKey    string
+	compatResult []compat.Problem
+
+	jvmdgMu sync.Mutex
+	jvmdg   map[string]*compat.JvmdgSource
+
+	offers map[string]*resolve.Offer
 }
 
 type Settings struct {
@@ -388,11 +403,7 @@ func (a *App) SetSkipped(key string, skip bool) error {
 	}
 	pack := a.pack
 	if pack != nil {
-		for _, m := range pack.Mods {
-			if m.Key == key {
-				m.Skipped = skip
-			}
-		}
+		pack.SetSkipped(key, skip)
 	}
 	a.mu.Unlock()
 	if pack == nil {
@@ -449,7 +460,7 @@ func (a *App) Update(ids []string, continued bool) (*Report, error) {
 	}
 	a.post.Lock()
 	var todo []*resolve.Mod
-	for _, m := range pack.Mods {
+	for _, m := range pack.List() {
 		if m.Status == resolve.StatusUpdate && !m.Skipped && want[m.ID] {
 			todo = append(todo, m)
 		}
@@ -519,9 +530,21 @@ func (a *App) Update(ids []string, continued bool) (*Report, error) {
 			logx.Printf("recheck after choosing a version: %v", err)
 		}
 	}
+	var done []install.Result
+	for _, r := range results {
+		if r.OK {
+			done = append(done, r)
+		}
+	}
+	warnings := a.compatWarnings(ctx, pack, done)
 
 	a.post.Lock()
 	defer a.post.Unlock()
+	for i, x := range report.Installed {
+		if w, ok := warnings[x.ID]; ok {
+			report.Installed[i].Warning = w
+		}
+	}
 	report.Server = mergeServer(report.Server, sync)
 	renamed := map[string]string{}
 	for _, r := range rechecked {
@@ -548,6 +571,177 @@ func (a *App) Update(ids []string, continued bool) (*Report, error) {
 	return &out, nil
 }
 
+func (a *App) compatEnv(ctx context.Context, root string, failed *atomic.Bool) compat.Env {
+	a.jvmdgMu.Lock()
+	defer a.jvmdgMu.Unlock()
+	if a.jvmdg == nil {
+		a.jvmdg = map[string]*compat.JvmdgSource{}
+	}
+	src := a.jvmdg[root]
+	if src == nil {
+		cacheDir, _ := config.CacheDir()
+		src = &compat.JvmdgSource{PackRoot: root, CacheDir: cacheDir}
+		a.jvmdg[root] = src
+	}
+	return compat.Env{JvmdgClasses: func(version string) (map[string]bool, error) {
+		classes, err := src.Classes(ctx, version)
+		if err != nil {
+			failed.Store(true)
+			logx.Printf("compat: JvmDowngrader %s: %v", version, err)
+		}
+		return classes, err
+	}}
+}
+
+type compatInput struct {
+	name, path, key string
+	jar             *jarinfo.Jar
+}
+
+func (a *App) Compat() ([]compat.Problem, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	return a.compatProblems(a.ctx, pack), nil
+}
+
+func compatInputs(pack *resolve.Pack) []compatInput {
+	var out []compatInput
+	for _, m := range pack.Snapshot() {
+		if m.Jar != nil {
+			out = append(out, compatInput{name: m.FileName, path: m.Path, key: m.Jar.SHA1, jar: m.Jar})
+		}
+	}
+	return out
+}
+
+func (a *App) compatProblems(ctx context.Context, pack *resolve.Pack) []compat.Problem {
+	current := compatInputs(pack)
+	previous := a.previousVersions(pack, current)
+	h := sha1.New()
+	fmt.Fprintln(h, pack.Root)
+	for _, in := range append(slices.Clone(current), previous...) {
+		fmt.Fprintln(h, in.name, in.key)
+	}
+	key := hex.EncodeToString(h.Sum(nil))
+
+	a.compatMu.Lock()
+	defer a.compatMu.Unlock()
+	if key == a.compatKey {
+		return slices.Clone(a.compatResult)
+	}
+	began := time.Now()
+	cacheDir, _ := config.CacheDir()
+	jars := compatLoad(current, cacheDir)
+	old := map[string]*compat.Index{}
+	for _, j := range compatLoad(previous, cacheDir) {
+		old[j.Name] = j.Index
+	}
+	var list []compat.Jar
+	for _, j := range jars {
+		if j.Index != nil {
+			list = append(list, j)
+		}
+	}
+	var failed atomic.Bool
+	env := a.compatEnv(ctx, pack.Root, &failed)
+	problems := compat.Merge(compat.Check(list, env), compat.Replaced(list, old, env))
+	if problems == nil {
+		problems = []compat.Problem{}
+	}
+	logx.Printf("compat: %d problems in %v", len(problems), time.Since(began).Round(time.Millisecond))
+	if ctx.Err() == nil && !failed.Load() {
+		a.compatKey, a.compatResult = key, problems
+	}
+	if cacheDir != "" {
+		compat.PruneCache(cacheDir, 30*24*time.Hour)
+	}
+	return slices.Clone(problems)
+}
+
+func compatLoad(inputs []compatInput, cacheDir string) []compat.Jar {
+	jars := make([]compat.Jar, len(inputs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i, in := range inputs {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			x, err := compat.Load(in.path, in.key, cacheDir)
+			if err != nil {
+				logx.Printf("compat: %s not indexed: %v", in.path, err)
+				return
+			}
+			jars[i] = compat.Jar{Name: in.name, Path: in.path, Index: x}
+			if in.jar != nil {
+				jars[i].ModIDs, jars[i].Requires, jars[i].DeclaresDeps = in.jar.ModIDs, in.jar.Requires, in.jar.DeclaresDeps
+			}
+		})
+	}
+	wg.Wait()
+	return jars
+}
+
+func (a *App) previousVersions(pack *resolve.Pack, current []compatInput) []compatInput {
+	dir, err := config.BackupDir()
+	if err != nil {
+		return nil
+	}
+	present := map[string]bool{}
+	for _, in := range current {
+		present[in.name] = true
+	}
+	seen := map[string]bool{}
+	var out []compatInput
+	for _, s := range backup.All(dir, pack.Root) {
+		for _, it := range s.Pending() {
+			if it.Added || it.Remote != "" || strings.HasPrefix(it.Key, server.KeyPrefix) || !present[it.NewFile] || seen[it.NewFile] {
+				continue
+			}
+			path := s.Stored(it)
+			st, err := os.Stat(path)
+			if err != nil || st.IsDir() {
+				continue
+			}
+			seen[it.NewFile] = true
+			key := sha1.Sum([]byte(fmt.Sprintf("%s|%d|%d", path, st.Size(), st.ModTime().UnixNano())))
+			out = append(out, compatInput{name: it.NewFile, path: path, key: hex.EncodeToString(key[:])})
+		}
+	}
+	return out
+}
+
+func (a *App) compatWarnings(ctx context.Context, pack *resolve.Pack, done []install.Result) map[string]string {
+	if len(done) == 0 {
+		return nil
+	}
+	problems := slices.DeleteFunc(a.compatProblems(ctx, pack), func(p compat.Problem) bool { return !p.Severe })
+	previous := map[string]compatInput{}
+	for _, in := range a.previousVersions(pack, compatInputs(pack)) {
+		previous[in.name] = in
+	}
+	cacheDir, _ := config.CacheDir()
+	out := map[string]string{}
+	for _, r := range done {
+		own := problems
+		if in, ok := previous[r.FileTo]; ok {
+			x, err := compat.Load(in.path, in.key, cacheDir)
+			j, jerr := jarinfo.Read(in.path)
+			if err == nil && jerr == nil {
+				own = compat.Introduced(problems, r.FileTo, compat.Jar{Name: r.FileTo, Index: x, ModIDs: j.ModIDs, Requires: j.Requires, DeclaresDeps: j.DeclaresDeps})
+			}
+		}
+		if text := compat.Summary(r.FileTo, own); text != "" {
+			out[r.ID] = text
+			logx.Printf("compat: %s: %s", r.FileTo, text)
+		}
+	}
+	return out
+}
+
 func (a *App) recheckOptions(root string) resolve.Options {
 	cacheDir, _ := config.CacheDir()
 	return resolve.Options{
@@ -555,6 +749,66 @@ func (a *App) recheckOptions(root string) resolve.Options {
 		CacheDir:      cacheDir,
 		Skipped:       func(key string) bool { return a.store.Skipped(root, key) },
 	}
+}
+
+func (a *App) FindMissing(modID string) (*resolve.Offer, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	offer, err := pack.Find(a.ctx, modID, a.recheckOptions(pack.Root))
+	if err != nil {
+		logx.Printf("find %s: %v", modID, err)
+		return nil, err
+	}
+	a.mu.Lock()
+	if a.offers == nil {
+		a.offers = map[string]*resolve.Offer{}
+	}
+	a.offers[pack.Root+"|"+modID] = offer
+	a.mu.Unlock()
+	return offer, nil
+}
+
+func (a *App) InstallMissing(modID string) (*resolve.Mod, error) {
+	a.mu.Lock()
+	pack := a.pack
+	var offer *resolve.Offer
+	if pack != nil {
+		offer = a.offers[pack.Root+"|"+modID]
+	}
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	if offer == nil {
+		return nil, fmt.Errorf("%s was not found", modID)
+	}
+	dir, err := config.BackupDir()
+	if err != nil {
+		return nil, err
+	}
+	ctx, err := a.joinOp()
+	if err != nil {
+		return nil, err
+	}
+	defer a.leaveOp()
+	path, err := install.Add(ctx, pack, modID, offer.Target, func(int) {})
+	if err != nil {
+		logx.Printf("%s: install failed: %v", modID, err)
+		return nil, err
+	}
+	m := pack.Add(context.WithoutCancel(ctx), path, a.recheckOptions(pack.Root))
+	a.post.Lock()
+	defer a.post.Unlock()
+	session := backup.Begin(dir, pack.Root)
+	session.Add(backup.Item{Key: m.Key, Name: m.Name, Dir: pack.ModsDir, NewFile: m.FileName, To: m.Version, Added: true})
+	if err := session.Save(); err != nil {
+		logx.Printf("backup session not saved: %v", err)
+	}
+	return m, nil
 }
 
 func (a *App) Versions(id string) ([]resolve.Choice, error) {
@@ -595,7 +849,7 @@ func fillReport(report *Report, pack *resolve.Pack) {
 	for _, r := range report.Failed {
 		installed[r.ID] = true
 	}
-	for _, m := range pack.Mods {
+	for _, m := range pack.List() {
 		switch {
 		case installed[m.ID]:
 		case m.Skipped:
@@ -695,9 +949,14 @@ func (a *App) Undo(ids []string) (*UndoResult, error) {
 	}
 	a.post.Unlock()
 	moved := map[string]string{}
+	var removed []string
 	for _, r := range results {
 		logx.Printf("undo %s: %s -> %s, ok=%v %s", r.Name, r.From, r.To, r.OK, r.Error)
-		if r.OK && !strings.HasPrefix(r.Key, server.KeyPrefix) {
+		switch {
+		case !r.OK || strings.HasPrefix(r.Key, server.KeyPrefix):
+		case r.Added:
+			removed = append(removed, filepath.Join(r.Dir, r.NewFile))
+		default:
 			moved[filepath.Join(r.Dir, r.NewFile)] = filepath.Join(r.Dir, r.File)
 		}
 	}
@@ -705,12 +964,20 @@ func (a *App) Undo(ids []string) (*UndoResult, error) {
 	a.mu.Lock()
 	pack := a.pack
 	a.mu.Unlock()
-	if pack == nil || len(moved) == 0 {
+	if pack == nil || len(moved) == 0 && len(removed) == 0 {
 		return out, nil
 	}
-	out.Mods, err = pack.Recheck(context.WithoutCancel(ctx), moved, a.recheckOptions(pack.Root))
-	if err != nil {
-		logx.Printf("recheck after undo: %v", err)
+	for _, path := range removed {
+		if id := pack.Remove(path); id != "" {
+			out.Mods = append(out.Mods, resolve.Replaced{OldID: id})
+		}
+	}
+	if len(moved) > 0 {
+		rechecked, err := pack.Recheck(context.WithoutCancel(ctx), moved, a.recheckOptions(pack.Root))
+		if err != nil {
+			logx.Printf("recheck after undo: %v", err)
+		}
+		out.Mods = append(out.Mods, rechecked...)
 	}
 	undone := map[string]bool{}
 	for _, r := range out.Mods {

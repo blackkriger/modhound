@@ -10,6 +10,7 @@ export namespace backup {
 	    from: string;
 	    to: string;
 	    restored: boolean;
+	    added?: boolean;
 	    time?: string;
 	    remote?: string;
 	
@@ -28,6 +29,7 @@ export namespace backup {
 	        this.from = source["from"];
 	        this.to = source["to"];
 	        this.restored = source["restored"];
+	        this.added = source["added"];
 	        this.time = source["time"];
 	        this.remote = source["remote"];
 	    }
@@ -40,6 +42,7 @@ export namespace backup {
 	    file: string;
 	    ok: boolean;
 	    error: string;
+	    added: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Result(source);
@@ -54,6 +57,32 @@ export namespace backup {
 	        this.file = source["file"];
 	        this.ok = source["ok"];
 	        this.error = source["error"];
+	        this.added = source["added"];
+	    }
+	}
+
+}
+
+export namespace compat {
+	
+	export class Problem {
+	    jar: string;
+	    kind: string;
+	    cause: string;
+	    details: string[];
+	    severe: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Problem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.jar = source["jar"];
+	        this.kind = source["kind"];
+	        this.cause = source["cause"];
+	        this.details = source["details"];
+	        this.severe = source["severe"];
 	    }
 	}
 
@@ -105,6 +134,7 @@ export namespace jarinfo {
 	    authors: string[];
 	    logoFile: string;
 	    requiredMods: string[];
+	    useDependencyInformation: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ModInfo(source);
@@ -122,6 +152,7 @@ export namespace jarinfo {
 	        this.authors = source["authors"];
 	        this.logoFile = source["logoFile"];
 	        this.requiredMods = source["requiredMods"];
+	        this.useDependencyInformation = source["useDependencyInformation"];
 	    }
 	}
 	export class Jar {
@@ -134,6 +165,7 @@ export namespace jarinfo {
 	    LogoType: string;
 	    ModIDs: string[];
 	    Requires: string[];
+	    DeclaresDeps: string[];
 	    ClassMajor: number;
 	    Valid: boolean;
 	
@@ -152,6 +184,7 @@ export namespace jarinfo {
 	        this.LogoType = source["LogoType"];
 	        this.ModIDs = source["ModIDs"];
 	        this.Requires = source["Requires"];
+	        this.DeclaresDeps = source["DeclaresDeps"];
 	        this.ClassMajor = source["ClassMajor"];
 	        this.Valid = source["Valid"];
 	    }
@@ -506,6 +539,42 @@ export namespace resolve {
 		}
 	}
 	
+	export class Offer {
+	    modId: string;
+	    name: string;
+	    source: string;
+	    target?: Target;
+	
+	    static createFrom(source: any = {}) {
+	        return new Offer(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.modId = source["modId"];
+	        this.name = source["name"];
+	        this.source = source["source"];
+	        this.target = this.convertValues(source["target"], Target);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class Pack {
 	    root: string;
 	    modsDir: string;

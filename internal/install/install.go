@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/blackkriger/modhound/internal/backup"
+	"github.com/blackkriger/modhound/internal/compat"
 	"github.com/blackkriger/modhound/internal/fsx"
 	"github.com/blackkriger/modhound/internal/httpx"
 	"github.com/blackkriger/modhound/internal/jarinfo"
@@ -44,59 +46,6 @@ type Result struct {
 	OK       bool   `json:"ok"`
 	Error    string `json:"error"`
 	Warning  string `json:"warning"`
-}
-
-var builtin = map[string]bool{"forge": true, "fml": true, "minecraft": true, "mcp": true, "minecraftforge": true}
-
-func requiredIDs(requires []string) []string {
-	var out []string
-	for _, r := range requires {
-		for _, part := range splitOutsideBrackets(r) {
-			id := strings.ToLower(strings.TrimSpace(part))
-			if i := strings.IndexAny(id, "@["); i >= 0 {
-				id = strings.TrimSpace(id[:i])
-			}
-			if id != "" && !builtin[id] {
-				out = append(out, id)
-			}
-		}
-	}
-	return out
-}
-
-func splitOutsideBrackets(s string) []string {
-	var out []string
-	depth, start := 0, 0
-	for i, r := range s {
-		switch r {
-		case '[', '(':
-			depth++
-		case ']', ')':
-			depth--
-		case ',':
-			if depth <= 0 {
-				out = append(out, s[start:i])
-				start = i + 1
-			}
-		}
-	}
-	return append(out, s[start:])
-}
-
-func missingRequired(pack *resolve.Pack, old, requires []string) []string {
-	had := map[string]bool{}
-	for _, id := range requiredIDs(old) {
-		had[id] = true
-	}
-	var out []string
-	for _, id := range requiredIDs(requires) {
-		if pack.ModIDs[id] || had[id] {
-			continue
-		}
-		had[id] = true
-		out = append(out, id)
-	}
-	return out
 }
 
 var javaVersions = map[int]string{50: "6", 51: "7", 52: "8", 53: "9", 54: "10", 55: "11", 56: "12", 57: "13", 58: "14", 59: "15", 60: "16", 61: "17", 62: "18", 63: "19", 64: "20", 65: "21", 66: "22", 67: "23", 68: "24", 69: "25"}
@@ -140,7 +89,7 @@ func Run(ctx context.Context, pack *resolve.Pack, mods []*resolve.Mod, session *
 			}
 			var err error
 			if err = ctx.Err(); err == nil {
-				err = one(ctx, pack, m, session, &res, func(pct int) {
+				err = one(ctx, pack, m, session, func(pct int) {
 					emit(Event{ID: m.ID, State: StateDownloading, Percent: pct})
 				})
 			}
@@ -191,16 +140,10 @@ func mcVersionMatches(declared, pack string) bool {
 	return v == "" || v == pack || strings.HasPrefix(pack, v+".")
 }
 
-func one(ctx context.Context, pack *resolve.Pack, m *resolve.Mod, session *backup.Session, res *Result, progress func(pct int)) error {
+func one(ctx context.Context, pack *resolve.Pack, m *resolve.Mod, session *backup.Session, progress func(pct int)) error {
 	t := m.Target
-	if t == nil || t.DownloadURL == "" {
-		return errors.New("no download available")
-	}
-	if !strings.HasPrefix(t.DownloadURL, "https://") {
-		return errors.New("download is not served over https")
-	}
-	if !safeFileName(t.FileName) {
-		return fmt.Errorf("unsafe file name %q", t.FileName)
+	if err := checkTarget(t); err != nil {
+		return err
 	}
 	dir := filepath.Dir(m.Path)
 	dest := filepath.Join(dir, t.FileName)
@@ -212,6 +155,70 @@ func one(ctx context.Context, pack *resolve.Pack, m *resolve.Mod, session *backu
 
 	part := filepath.Join(dir, ".modhound-"+randomHex()+".part")
 	defer os.Remove(part)
+	if _, err := fetch(ctx, pack, m.FileName, t, part, progress); err != nil {
+		return err
+	}
+	err := replaceKeeping(session, m, part, dest)
+	logx.Printf("%s: replaced with %s, err=%v", m.FileName, t.FileName, err)
+	return err
+}
+
+var adding sync.Mutex
+
+func Add(ctx context.Context, pack *resolve.Pack, modID string, t *resolve.Target, progress func(pct int)) (string, error) {
+	if err := checkTarget(t); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(pack.ModsDir, t.FileName)
+	if _, err := os.Stat(dest); err == nil {
+		return "", fmt.Errorf("%s already exists", t.FileName)
+	}
+	part := filepath.Join(pack.ModsDir, ".modhound-"+randomHex()+".part")
+	defer os.Remove(part)
+	j, err := fetch(ctx, pack, modID, t, part, progress)
+	if err != nil {
+		return "", err
+	}
+	if !provides(part, j, modID) {
+		return "", fmt.Errorf("%s does not contain the mod %s", t.FileName, modID)
+	}
+	adding.Lock()
+	defer adding.Unlock()
+	if _, err := os.Stat(dest); err == nil {
+		return "", fmt.Errorf("%s already exists", t.FileName)
+	}
+	if err := os.Rename(part, dest); err != nil {
+		return "", fmt.Errorf("cannot place the new file: %w", err)
+	}
+	logx.Printf("%s: added %s", modID, t.FileName)
+	return dest, nil
+}
+
+func provides(path string, j *jarinfo.Jar, modID string) bool {
+	has := func(ids []string) bool {
+		return slices.ContainsFunc(ids, func(id string) bool { return strings.EqualFold(id, modID) })
+	}
+	if has(j.ModIDs) {
+		return true
+	}
+	x, err := compat.Load(path, "", "")
+	return err == nil && has(x.ModIDs)
+}
+
+func checkTarget(t *resolve.Target) error {
+	if t == nil || t.DownloadURL == "" {
+		return errors.New("no download available")
+	}
+	if !strings.HasPrefix(t.DownloadURL, "https://") {
+		return errors.New("download is not served over https")
+	}
+	if !safeFileName(t.FileName) {
+		return fmt.Errorf("unsafe file name %q", t.FileName)
+	}
+	return nil
+}
+
+func fetch(ctx context.Context, pack *resolve.Pack, name string, t *resolve.Target, part string, progress func(pct int)) (*jarinfo.Jar, error) {
 	progress(0)
 	last := -1
 	err := download(ctx, t.DownloadURL, part, func(done, size int64) {
@@ -223,47 +230,33 @@ func one(ctx context.Context, pack *resolve.Pack, m *resolve.Mod, session *backu
 		}
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	j, err := jarinfo.ReadFull(part)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mcv := ""
 	if j.Info != nil {
 		mcv = j.Info.MCVersion
 	}
-	logx.Printf("%s: downloaded %s, %d bytes, sha1 %s, valid jar %v, mcversion %q, %s", m.FileName, t.FileName, j.Size, j.SHA1, j.Valid, mcv, javaName(j.ClassMajor))
+	logx.Printf("%s: downloaded %s, %d bytes, sha1 %s, valid jar %v, mcversion %q, %s", name, t.FileName, j.Size, j.SHA1, j.Valid, mcv, javaName(j.ClassMajor))
 	if t.SHA512 != "" && !strings.EqualFold(j.SHA512, t.SHA512) {
-		return errors.New("downloaded file hash does not match")
+		return nil, errors.New("downloaded file hash does not match")
 	}
 	if t.SHA1 != "" && !strings.EqualFold(j.SHA1, t.SHA1) {
-		return errors.New("downloaded file hash does not match")
+		return nil, errors.New("downloaded file hash does not match")
 	}
 	if !j.Valid {
-		return errors.New("downloaded file is not a valid jar")
+		return nil, errors.New("downloaded file is not a valid jar")
 	}
 	if j.Info != nil && !mcVersionMatches(j.Info.MCVersion, pack.MCVersion) {
-		return fmt.Errorf("new version is built for Minecraft %s", j.Info.MCVersion)
-	}
-	var oldRequires []string
-	if m.Jar != nil {
-		oldRequires = m.Jar.Requires
-	}
-	if missing := missingRequired(pack, oldRequires, j.Requires); len(missing) > 0 {
-		res.Warning = "requires " + strings.Join(missing, ", ") + ", not found in the pack"
-		logx.Printf("%s: %s", m.FileName, res.Warning)
+		return nil, fmt.Errorf("new version is built for Minecraft %s", j.Info.MCVersion)
 	}
 	if j.ClassMajor > pack.MaxClassMajor && pack.MaxClassMajor > 0 {
-		return fmt.Errorf("new version requires %s, the pack targets %s", javaName(j.ClassMajor), javaName(pack.MaxClassMajor))
+		return nil, fmt.Errorf("new version requires %s, the pack targets %s", javaName(j.ClassMajor), javaName(pack.MaxClassMajor))
 	}
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	err = replaceKeeping(session, m, part, dest)
-	logx.Printf("%s: replaced with %s, err=%v", m.FileName, t.FileName, err)
-	return err
+	return j, ctx.Err()
 }
 
 func replaceKeeping(session *backup.Session, m *resolve.Mod, part, dest string) error {

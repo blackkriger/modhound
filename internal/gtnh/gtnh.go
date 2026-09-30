@@ -83,6 +83,10 @@ func (c *Catalog) Lookup(filename string) (Hit, bool) {
 	return h, ok
 }
 
+func (c *Catalog) Mods() []Mod {
+	return c.mods
+}
+
 func Load(ctx context.Context, cacheDir string) (*Catalog, error) {
 	cachePath := filepath.Join(cacheDir, "gtnh-assets.json")
 	raw, err := cachedGet(ctx, assetsURL, cachePath)

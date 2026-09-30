@@ -45,6 +45,22 @@ func (p *Pack) find(id string) *Mod {
 	return nil
 }
 
+func (p *Pack) SetSkipped(key string, skip bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, m := range p.Mods {
+		if m.Key == key {
+			m.Skipped = skip
+		}
+	}
+}
+
+func (p *Pack) List() []*Mod {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.Mods)
+}
+
 func (p *Pack) Snapshot() []Mod {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -68,12 +84,9 @@ func (p *Pack) MarkInstalled(m *Mod) {
 	defer p.mu.Unlock()
 	m.Path, m.FileName, m.Version = path, m.Target.FileName, m.Target.Version
 	m.Status, m.Reason, m.Target = StatusCurrent, "", nil
-	if j == nil {
-		return
-	}
-	m.Jar, m.Size = j, j.Size
-	for _, id := range j.ModIDs {
-		p.ModIDs[strings.ToLower(id)] = true
+	m.Jar = j
+	if j != nil {
+		m.Size = j.Size
 	}
 }
 

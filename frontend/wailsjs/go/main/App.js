@@ -34,8 +34,20 @@ export function ChooseVersion(arg1, arg2) {
   return window['go']['main']['App']['ChooseVersion'](arg1, arg2);
 }
 
+export function Compat() {
+  return window['go']['main']['App']['Compat']();
+}
+
 export function DefaultPack() {
   return window['go']['main']['App']['DefaultPack']();
+}
+
+export function FindMissing(arg1) {
+  return window['go']['main']['App']['FindMissing'](arg1);
+}
+
+export function InstallMissing(arg1) {
+  return window['go']['main']['App']['InstallMissing'](arg1);
 }
 
 export function KeepWindowSize() {

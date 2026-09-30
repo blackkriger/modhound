@@ -95,3 +95,22 @@ func Projects(ctx context.Context, ids []string) (map[string]Project, error) {
 func ProjectURL(slug string) string {
 	return "https://modrinth.com/mod/" + slug
 }
+
+type Hit struct {
+	ProjectID string `json:"project_id"`
+	Slug      string `json:"slug"`
+	Title     string `json:"title"`
+}
+
+func Search(ctx context.Context, query, loader, gameVersion string) ([]Hit, error) {
+	facets, _ := json.Marshal([][]string{{"project_type:mod"}, {"categories:" + loader}, {"versions:" + gameVersion}})
+	q := url.Values{}
+	q.Set("query", query)
+	q.Set("facets", string(facets))
+	q.Set("limit", "20")
+	var out struct {
+		Hits []Hit `json:"hits"`
+	}
+	err := do(ctx, http.MethodGet, "/search?"+q.Encode(), nil, &out)
+	return out.Hits, err
+}

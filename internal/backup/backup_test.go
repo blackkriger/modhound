@@ -45,6 +45,28 @@ func TestKeepAndRestore(t *testing.T) {
 	}
 }
 
+func TestRestoreAddedRemovesIt(t *testing.T) {
+	root, mods := t.TempDir(), t.TempDir()
+	added := filepath.Join(mods, "lib-2.0.jar")
+	os.WriteFile(added, []byte("lib"), 0o644)
+
+	s := Begin(root, mods)
+	s.Add(Item{Key: "lib", Name: "Lib", Dir: mods, NewFile: "lib-2.0.jar", Added: true})
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	res := All(root, mods)[0].Restore(map[string]bool{"lib|lib-2.0.jar": true})
+	if len(res) != 1 || !res[0].OK || !res[0].Added {
+		t.Fatalf("restore: %+v", res)
+	}
+	if _, err := os.Stat(added); !os.IsNotExist(err) {
+		t.Fatal("added file is still there")
+	}
+	if len(All(root, mods)) != 0 {
+		t.Fatal("a fully restored session is not offered again")
+	}
+}
+
 func TestKeepsPreviousVersionPerMod(t *testing.T) {
 	root, mods := t.TempDir(), t.TempDir()
 	put := func(name, body string) { os.WriteFile(filepath.Join(mods, name), []byte(body), 0o644) }

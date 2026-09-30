@@ -28,6 +28,7 @@ type Item struct {
 	From     string `json:"from"`
 	To       string `json:"to"`
 	Restored bool   `json:"restored"`
+	Added    bool   `json:"added,omitempty"`
 	Time     string `json:"time,omitempty"`
 	Remote   string `json:"remote,omitempty"`
 }
@@ -64,7 +65,7 @@ func (s *Session) Pending() []Item {
 	return out
 }
 
-func (s *Session) storedPath(it Item) string {
+func (s *Session) Stored(it Item) string {
 	if it.Remote != "" {
 		return it.Stored
 	}
@@ -185,11 +186,14 @@ func prune(dir, newest string) {
 }
 
 func (s *Session) discard(it Item) error {
+	if it.Added {
+		return nil
+	}
 	f, err := it.files()
 	if err != nil {
 		return err
 	}
-	stored := s.storedPath(it)
+	stored := s.Stored(it)
 	if !f.Exists(stored) {
 		return nil
 	}
@@ -244,7 +248,7 @@ func (s *Session) Restore(keys map[string]bool) []Result {
 		if it.Restored || (keys != nil && !keys[it.Key+"|"+it.NewFile]) {
 			continue
 		}
-		res := Result{Key: it.Key, Name: it.Name, From: it.To, To: it.From, File: it.OldFile, Dir: it.Dir, NewFile: it.NewFile}
+		res := Result{Key: it.Key, Name: it.Name, From: it.To, To: it.From, File: it.OldFile, Added: it.Added, Dir: it.Dir, NewFile: it.NewFile}
 		if err := s.restore(*it); err != nil {
 			res.Error = err.Error()
 		} else {
@@ -274,6 +278,7 @@ type Result struct {
 	File  string `json:"file"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
+	Added bool   `json:"added"`
 
 	Dir     string `json:"-"`
 	NewFile string `json:"-"`
@@ -284,11 +289,17 @@ func (s *Session) restore(it Item) error {
 	if err != nil {
 		return err
 	}
-	stored := s.storedPath(it)
+	current := f.Join(it.Dir, it.NewFile)
+	if it.Added {
+		if err := f.Remove(current); err != nil && f.Exists(current) {
+			return fmt.Errorf("cannot remove %s (is the game running?): %w", it.NewFile, err)
+		}
+		return nil
+	}
+	stored := s.Stored(it)
 	if !f.Exists(stored) {
 		return errors.New("the saved copy is missing")
 	}
-	current := f.Join(it.Dir, it.NewFile)
 	original := f.Join(it.Dir, it.OldFile)
 	if !strings.EqualFold(current, original) && f.Exists(original) {
 		return fmt.Errorf("%s already exists", it.OldFile)
