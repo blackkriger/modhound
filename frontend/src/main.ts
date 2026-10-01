@@ -17,7 +17,7 @@ const STAGES: [string, string][] = [
     ['modrinth', 'Asking Modrinth'],
     ['resolve', 'Looking for updates'],
 ];
-const SOURCES: Record<string, string> = {gtnh: 'GTNH', curseforge: 'CurseForge', modrinth: 'Modrinth'};
+const SOURCES: Record<string, string> = {gtnh: 'GTNH', curseforge: 'CurseForge', modrinth: 'Modrinth', github: 'GitHub'};
 const GLYPH: Record<string, [string, string]> = {
     update: ['↑', 'm3-g m3-g--up'],
     need: ['!', 'm3-g m3-g--bad'],

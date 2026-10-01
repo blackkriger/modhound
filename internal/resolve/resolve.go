@@ -18,6 +18,7 @@ import (
 
 	"github.com/blackkriger/modhound/internal/curseforge"
 	"github.com/blackkriger/modhound/internal/fsx"
+	"github.com/blackkriger/modhound/internal/github"
 	"github.com/blackkriger/modhound/internal/gtnh"
 	"github.com/blackkriger/modhound/internal/httpx"
 	"github.com/blackkriger/modhound/internal/icons"
@@ -80,6 +81,7 @@ type Mod struct {
 	notes       notes
 	mr          *mrState
 	gt          *gtnh.Hit
+	gh          string
 	choices     map[string]choice
 	chosen      bool
 	autoSide    string
@@ -361,9 +363,14 @@ func identify(ctx context.Context, pack *Pack, mods []*Mod, opts *Options) *reso
 			}
 			logx.Printf("%s: found in %s", m.FileName, strings.Join(found, ", "))
 		}
+		if m.gt == nil {
+			m.gh = knownRepo(m)
+		}
 		switch {
 		case m.gt != nil:
 			m.Source, m.Key = SourceGTNH, "gtnh:"+m.gt.Mod.Name
+		case m.gh != "":
+			m.Source, m.Key = SourceGitHub, "gh:"+m.gh
 		case m.cf != nil:
 			m.Source, m.Key = SourceCurseForge, "cf:"+strconv.Itoa(m.cf.modID)
 		case m.mr != nil:
@@ -629,6 +636,8 @@ func (r *resolver) resolveAll(ctx context.Context, mods []*Mod) {
 				err = r.resolveCurseForge(ctx, m)
 			case SourceModrinth:
 				err = r.resolveModrinth(ctx, m)
+			case SourceGitHub:
+				err = r.resolveGitHub(ctx, m)
 			}
 			if err != nil {
 				m.Status, m.Reason, m.Target = StatusError, err.Error(), nil
@@ -832,6 +841,49 @@ func (r *resolver) resolveCurseForge(ctx context.Context, m *Mod) error {
 	return nil
 }
 
+func (r *resolver) resolveGitHub(ctx context.Context, m *Mod) error {
+	releases, err := github.Releases(ctx, m.gh)
+	if err != nil {
+		return err
+	}
+	var best, installed *github.Release
+	var asset *github.Asset
+	for i := range releases {
+		rel := &releases[i]
+		jar := releaseJar(rel, m.FileName, r.pack.MCVersion)
+		if rel.Draft || jar == nil {
+			continue
+		}
+		if strings.EqualFold(jar.Name, m.FileName) {
+			installed = rel
+		}
+		if !rel.Prerelease && (best == nil || rel.Published.After(best.Published)) {
+			best, asset = rel, jar
+		}
+	}
+	logx.Printf("%s: github %s, %d releases, latest %v", m.FileName, m.gh, len(releases), best != nil)
+	if best == nil || strings.EqualFold(asset.Name, m.FileName) || installed != nil && !best.Published.After(installed.Published) ||
+		installed == nil && (sameVersion(asset.Name, m.FileName, r.pack.MCVersion) || OlderVersion(asset.Name, m.FileName, r.pack.MCVersion)) {
+		m.Status = StatusCurrent
+		return nil
+	}
+	m.Status = StatusUpdate
+	m.Target = &Target{Version: best.Tag, FileName: asset.Name, Date: best.Published.Format(time.DateOnly), PageURL: best.HTMLURL, DownloadURL: asset.URL}
+	for i := range releases {
+		rel := &releases[i]
+		if rel.Draft || rel.Prerelease || rel.Published.After(best.Published) || installed != nil && !rel.Published.After(installed.Published) {
+			continue
+		}
+		if installed == nil && rel != best {
+			continue
+		}
+		if text := strings.TrimSpace(rel.Body); text != "" {
+			m.notes.text += "## " + rel.Tag + "\n" + text + "\n\n"
+		}
+	}
+	return nil
+}
+
 func releaseRank(t string) int {
 	switch t {
 	case "beta":
@@ -954,6 +1006,13 @@ func fillMeta(m *Mod, mcVersion string, cfMods map[int]curseforge.Mod, mrProject
 		m.Name = first(m.Name, m.gt.Mod.Name)
 		m.Version = m.gt.Mod.Versions[m.gt.Index].Tag
 		m.URL = first(m.gt.Mod.URL(), m.URL)
+	case m.gh != "":
+		m.URL = github.RepoURL(m.gh)
+		if info != nil {
+			m.Version = first(info.Version, FileVersion(m.FileName, mcVersion))
+		} else {
+			m.Version = FileVersion(m.FileName, mcVersion)
+		}
 	case m.mr != nil && m.Source == SourceModrinth:
 		m.Version = m.mr.version.VersionNumber
 	default:

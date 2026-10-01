@@ -4,7 +4,7 @@
 
 Finds and installs mod updates for your Minecraft modpack. Made for my own modpack, which I play on legacy TL from time to time, but works for updating mods in any modpack, as long as it has a folder with mods in it. 
 
-modhound identifies every jar in the `mods` folder by its hash on CurseForge and Modrinth, and GT New Horizons mods by the GTNH asset manifest. It only installs files built for the modpack's Minecraft version and loader, checks each download before replacing the old jar file, keeps the previous version of every mod it updates, and writes a report of what was updated. It also reads the class files of every mod to warn about mods that won't work together, and explains the game's latest crash. 
+modhound identifies every jar in the `mods` folder by its hash on CurseForge and Modrinth, GT New Horizons mods by the GTNH asset manifest, and a few mods by their GitHub releases. It only installs files built for the modpack's Minecraft version and loader, checks each download before replacing the old jar file, keeps the previous version of every mod it updates, and writes a report of what was updated. It also reads the class files of every mod to warn about mods that won't work together, and explains the game's latest crash. 
 
 ![modhound update list](screenshots/modhound-updates.png)
 

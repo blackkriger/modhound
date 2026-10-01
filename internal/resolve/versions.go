@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blackkriger/modhound/internal/curseforge"
+	"github.com/blackkriger/modhound/internal/github"
 	"github.com/blackkriger/modhound/internal/gtnh"
 	"github.com/blackkriger/modhound/internal/jarinfo"
 	"github.com/blackkriger/modhound/internal/logx"
@@ -144,6 +145,20 @@ func (p *Pack) Versions(ctx context.Context, id, curseForgeKey string) ([]Choice
 			}
 			add(Choice{ID: "gtnh:" + strconv.Itoa(i), Version: v.Tag, FileName: v.Filename, Date: t.Date, Pre: v.Prerelease}, ch)
 		}
+	case m.gh != "":
+		releases, err := github.Releases(ctx, m.gh)
+		if err != nil {
+			return nil, err
+		}
+		slices.SortFunc(releases, func(a, b github.Release) int { return b.Published.Compare(a.Published) })
+		for _, rel := range releases {
+			jar := releaseJar(&rel, m.FileName, p.MCVersion)
+			if rel.Draft || jar == nil {
+				continue
+			}
+			t := &Target{Version: rel.Tag, FileName: jar.Name, Date: rel.Published.Format(time.DateOnly), PageURL: rel.HTMLURL, DownloadURL: jar.URL}
+			add(Choice{ID: "gh:" + rel.Tag, Version: rel.Tag, FileName: jar.Name, Date: t.Date, Pre: rel.Prerelease}, choice{target: t, notes: rel.Body})
+		}
 	case m.cf != nil:
 		if curseForgeKey == "" {
 			return nil, errors.New("needs a CurseForge API key")
@@ -180,7 +195,7 @@ func (p *Pack) Versions(ctx context.Context, id, curseForgeKey string) ([]Choice
 			add(Choice{ID: "mr:" + v.ID, Version: v.VersionNumber, FileName: f.Filename, Date: t.Date, Pre: v.VersionType != "release"}, choice{target: t, notes: v.Changelog})
 		}
 	default:
-		return nil, errors.New("the mod was not found on GTNH, CurseForge or Modrinth")
+		return nil, errors.New("the mod was not found on GTNH, CurseForge, Modrinth or GitHub")
 	}
 	p.mu.Lock()
 	found.choices = choices
