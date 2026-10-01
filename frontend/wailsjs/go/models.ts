@@ -11,6 +11,9 @@ export namespace backup {
 	    to: string;
 	    restored: boolean;
 	    added?: boolean;
+	    removed?: boolean;
+	    modIds?: string[];
+	    pair?: string;
 	    time?: string;
 	    remote?: string;
 	
@@ -30,6 +33,9 @@ export namespace backup {
 	        this.to = source["to"];
 	        this.restored = source["restored"];
 	        this.added = source["added"];
+	        this.removed = source["removed"];
+	        this.modIds = source["modIds"];
+	        this.pair = source["pair"];
 	        this.time = source["time"];
 	        this.remote = source["remote"];
 	    }
@@ -43,6 +49,7 @@ export namespace backup {
 	    ok: boolean;
 	    error: string;
 	    added: boolean;
+	    removed: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Result(source);
@@ -58,6 +65,7 @@ export namespace backup {
 	        this.ok = source["ok"];
 	        this.error = source["error"];
 	        this.added = source["added"];
+	        this.removed = source["removed"];
 	    }
 	}
 
@@ -165,7 +173,6 @@ export namespace jarinfo {
 	    LogoType: string;
 	    ModIDs: string[];
 	    Requires: string[];
-	    DeclaresDeps: string[];
 	    ClassMajor: number;
 	    Valid: boolean;
 	
@@ -184,7 +191,6 @@ export namespace jarinfo {
 	        this.LogoType = source["LogoType"];
 	        this.ModIDs = source["ModIDs"];
 	        this.Requires = source["Requires"];
-	        this.DeclaresDeps = source["DeclaresDeps"];
 	        this.ClassMajor = source["ClassMajor"];
 	        this.Valid = source["Valid"];
 	    }
@@ -211,6 +217,105 @@ export namespace jarinfo {
 }
 
 export namespace main {
+	
+	export class Crash {
+	    file: string;
+	    time: string;
+	    error: string;
+	    missing: string;
+	    culprit: string;
+	    cause: string;
+	    jvmdg: boolean;
+	    rootError: string;
+	    rootMissing: string;
+	    rootJvmdg: boolean;
+	    rootFound: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Crash(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.file = source["file"];
+	        this.time = source["time"];
+	        this.error = source["error"];
+	        this.missing = source["missing"];
+	        this.culprit = source["culprit"];
+	        this.cause = source["cause"];
+	        this.jvmdg = source["jvmdg"];
+	        this.rootError = source["rootError"];
+	        this.rootMissing = source["rootMissing"];
+	        this.rootJvmdg = source["rootJvmdg"];
+	        this.rootFound = source["rootFound"];
+	    }
+	}
+	export class Kept {
+	    name: string;
+	    users: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Kept(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.users = source["users"];
+	    }
+	}
+	export class Orphan {
+	    id: string;
+	    name: string;
+	    by: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Orphan(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.by = source["by"];
+	    }
+	}
+	export class Dependencies {
+	    orphans: Orphan[];
+	    kept: Kept[];
+	    dependents: string[];
+	    users: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Dependencies(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.orphans = this.convertValues(source["orphans"], Orphan);
+	        this.kept = this.convertValues(source["kept"], Kept);
+	        this.dependents = source["dependents"];
+	        this.users = source["users"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	
 	export class LastUpdate {
 	    restorable: backup.Item[];
@@ -259,6 +364,41 @@ export namespace main {
 	        this.reason = source["reason"];
 	        this.pageUrl = source["pageUrl"];
 	    }
+	}
+	
+	export class RemoveResult {
+	    removed: string[];
+	    failed: string[];
+	    server: server.Result[];
+	
+	    static createFrom(source: any = {}) {
+	        return new RemoveResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.removed = source["removed"];
+	        this.failed = source["failed"];
+	        this.server = this.convertValues(source["server"], server.Result);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class ServerSync {
 	    root: string;
@@ -492,6 +632,8 @@ export namespace resolve {
 	    reason: string;
 	    target?: Target;
 	    skipped: boolean;
+	    side: string;
+	    sideSet: boolean;
 	    size: number;
 	    debug?: ModDebug;
 	
@@ -516,6 +658,8 @@ export namespace resolve {
 	        this.reason = source["reason"];
 	        this.target = this.convertValues(source["target"], Target);
 	        this.skipped = source["skipped"];
+	        this.side = source["side"];
+	        this.sideSet = source["sideSet"];
 	        this.size = source["size"];
 	        this.debug = this.convertValues(source["debug"], ModDebug);
 	    }

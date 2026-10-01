@@ -31,16 +31,16 @@ func TestMissingRequiredMods(t *testing.T) {
 	}
 }
 
-func TestDeclaredDepsOverrideAnnotation(t *testing.T) {
+func TestRequirementsFromInfoAndAnnotation(t *testing.T) {
 	a := jar("a.jar", []string{"a"}, []string{"b"}, "required-after:gtnhlib")
-	a.DeclaresDeps = []string{"a"}
 	var got []string
 	for _, p := range Check([]Jar{a}, Env{}) {
 		if p.Kind == KindMissing {
 			got = append(got, p.Cause)
 		}
 	}
-	if want := []string{"b"}; !slices.Equal(got, want) {
+	slices.Sort(got)
+	if want := []string{"b", "gtnhlib"}; !slices.Equal(got, want) {
 		t.Fatalf("missing = %v, want %v", got, want)
 	}
 }
@@ -121,5 +121,22 @@ func TestReplacedInheritedFromPlatform(t *testing.T) {
 	ps := Replaced(jars, old, Env{})
 	if len(ps) != 1 || !slices.Equal(ps[0].Details, []string{"Event.setEnergy()"}) {
 		t.Fatalf("got %+v", ps)
+	}
+}
+
+func TestDuplicateMods(t *testing.T) {
+	a := jar("a-1.jar", []string{"a"}, nil)
+	a.Index.Mods = []string{"A"}
+	b := jar("a-2.jar", []string{"a"}, nil)
+	b.Index.Mods = []string{"a"}
+	c := jar("lib.jar", []string{"a"}, nil)
+	var got []string
+	for _, p := range Check([]Jar{a, b, c}, Env{}) {
+		if p.Kind == KindDuplicate {
+			got = append(got, p.Jar+"<"+p.Cause)
+		}
+	}
+	if want := []string{"a-1.jar<a-2.jar", "a-2.jar<a-1.jar"}; !slices.Equal(got, want) {
+		t.Fatalf("got %v", got)
 	}
 }

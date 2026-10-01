@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"github.com/blackkriger/modhound/internal/backup"
 	"github.com/blackkriger/modhound/internal/compat"
 	"github.com/blackkriger/modhound/internal/config"
+	"github.com/blackkriger/modhound/internal/crash"
 	"github.com/blackkriger/modhound/internal/fsx"
 	"github.com/blackkriger/modhound/internal/install"
 	"github.com/blackkriger/modhound/internal/jarinfo"
@@ -50,14 +52,25 @@ type App struct {
 	opsCtx    context.Context
 	opsCancel context.CancelFunc
 
-	compatMu     sync.Mutex
-	compatKey    string
-	compatResult []compat.Problem
+	compatMu      sync.Mutex
+	compatKey     string
+	compatResult  []compat.Problem
+	compatFailed  bool
+	compatAt      time.Time
+	compatClasses map[string]string
+	compatNeeds   map[string][]string
+	compatHas     map[string][]string
+	compatMods    map[string][]string
+	compatUses    map[string][]string
 
 	jvmdgMu sync.Mutex
 	jvmdg   map[string]*compat.JvmdgSource
 
 	offers map[string]*resolve.Offer
+
+	removedIDs map[string][]string
+	opened     map[string]bool
+	syncing    bool
 }
 
 type Settings struct {
@@ -114,12 +127,13 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	selfupdate.CleanOld()
 	migrateErr := config.Migrate()
-	fsx.KeyFor = func(string) string { return a.serverKey() }
+	fsx.KeyFor = a.keyFor
 	go a.forwardLogs()
 	a.configureLog()
 	if migrateErr != nil {
 		logx.Printf("moving data to the local app data folder: %v", migrateErr)
 	}
+	go a.purgeRemoteRemoved(backup.SessionID(time.Now()))
 }
 
 func (a *App) configureLog() {
@@ -377,6 +391,7 @@ func (a *App) Check(root string) (*resolve.Pack, error) {
 		CurseForgeKey: a.store.CurseForgeKey(),
 		CacheDir:      cacheDir,
 		Skipped:       func(key string) bool { return a.store.Skipped(root, key) },
+		Side:          func(key string) string { return a.store.Side(root, key) },
 		Progress:      a.emitProgress,
 		OnMod:         func(m *resolve.Mod) { runtime.EventsEmit(a.ctx, "mod", m) },
 		OnMatched: func(gtnh, curseforge, modrinth int) {
@@ -391,6 +406,10 @@ func (a *App) Check(root string) (*resolve.Pack, error) {
 	}
 	a.mu.Lock()
 	a.pack = pack
+	if a.opened == nil {
+		a.opened = map[string]bool{}
+	}
+	a.opened[pack.Root] = true
 	a.mu.Unlock()
 	return pack, nil
 }
@@ -413,10 +432,73 @@ func (a *App) SetSkipped(key string, skip bool) error {
 	return a.store.SetSkipped(pack.Root, key, skip)
 }
 
+func (a *App) shutdown(context.Context) {
+	dir, err := config.BackupDir()
+	if err != nil {
+		return
+	}
+	a.mu.Lock()
+	roots := slices.Collect(maps.Keys(a.opened))
+	a.mu.Unlock()
+	a.post.Lock()
+	defer a.post.Unlock()
+	for _, root := range roots {
+		if n := backup.PurgeRemoved(dir, root, false, ""); n > 0 {
+			logx.Printf("purged %d removed mods of %s", n, root)
+		}
+	}
+}
+
+func (a *App) purgeRemoteRemoved(before string) {
+	dir, err := config.BackupDir()
+	if err != nil {
+		return
+	}
+	for root, p := range a.store.Get().Packs {
+		if p.Server == nil || !fsx.IsRemote(*p.Server) {
+			continue
+		}
+		f, base, err := fsx.Open(*p.Server)
+		if err != nil {
+			continue
+		}
+		if _, err := f.Lookup(base); err != nil {
+			logx.Printf("server of %s unreachable, removed server mods kept for later: %v", root, err)
+			continue
+		}
+		a.post.Lock()
+		n := backup.PurgeRemoved(dir, root, true, before)
+		a.post.Unlock()
+		if n > 0 {
+			logx.Printf("purged %d removed server mods of %s", n, root)
+		}
+	}
+}
+
+func (a *App) keyFor(target string) string {
+	if current := a.serverRoot(); fsx.IsRemote(current) {
+		if t, err := fsx.ParseTarget(current); err == nil && t.String() == target {
+			return a.serverKey()
+		}
+	}
+	for pack, p := range a.store.Get().Packs {
+		if p.Server == nil || !fsx.IsRemote(*p.Server) {
+			continue
+		}
+		if t, err := fsx.ParseTarget(*p.Server); err == nil && t.String() == target {
+			if key := a.store.ServerKey(pack); key != "" {
+				return key
+			}
+			return fsx.DefaultKey()
+		}
+	}
+	return a.serverKey()
+}
+
 func (a *App) beforeClose(context.Context) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.ops > 0
+	return a.ops > 0 || a.syncing
 }
 
 func (a *App) joinOp() (context.Context, error) {
@@ -630,7 +712,7 @@ func (a *App) compatProblems(ctx context.Context, pack *resolve.Pack) []compat.P
 
 	a.compatMu.Lock()
 	defer a.compatMu.Unlock()
-	if key == a.compatKey {
+	if key == a.compatKey && (!a.compatFailed || time.Since(a.compatAt) < 10*time.Minute) {
 		return slices.Clone(a.compatResult)
 	}
 	began := time.Now()
@@ -653,13 +735,381 @@ func (a *App) compatProblems(ctx context.Context, pack *resolve.Pack) []compat.P
 		problems = []compat.Problem{}
 	}
 	logx.Printf("compat: %d problems in %v", len(problems), time.Since(began).Round(time.Millisecond))
-	if ctx.Err() == nil && !failed.Load() {
-		a.compatKey, a.compatResult = key, problems
+	if ctx.Err() == nil {
+		a.compatKey, a.compatResult, a.compatFailed, a.compatAt = key, problems, failed.Load(), time.Now()
+		a.compatClasses = compat.ClassJars(list)
+		a.compatUses = compat.JarUses(list, a.compatClasses)
+		a.compatNeeds, a.compatHas, a.compatMods = map[string][]string{}, map[string][]string{}, map[string][]string{}
+		for _, j := range list {
+			a.compatNeeds[j.Name], a.compatHas[j.Name], a.compatMods[j.Name] = compat.Needs(j), compat.Provides(j), compat.Declares(j)
+		}
 	}
 	if cacheDir != "" {
 		compat.PruneCache(cacheDir, 30*24*time.Hour)
 	}
 	return slices.Clone(problems)
+}
+
+type Crash struct {
+	File    string `json:"file"`
+	Time    string `json:"time"`
+	Error   string `json:"error"`
+	Missing string `json:"missing"`
+	Culprit string `json:"culprit"`
+	Cause   string `json:"cause"`
+	Jvmdg   bool   `json:"jvmdg"`
+
+	RootError   string `json:"rootError"`
+	RootMissing string `json:"rootMissing"`
+	RootJvmdg   bool   `json:"rootJvmdg"`
+	RootFound   bool   `json:"rootFound"`
+}
+
+func (a *App) Crash() (*Crash, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	r, err := crash.Latest(pack.Root)
+	if err != nil || r == nil || a.store.CrashSeen(pack.Root) == filepath.Base(r.Path) {
+		return nil, err
+	}
+	problems := a.compatProblems(a.ctx, pack)
+	a.compatMu.Lock()
+	classes, jvmdgFailed := a.compatClasses, a.compatFailed
+	a.compatMu.Unlock()
+	at := len(r.Causes) - 1
+	out := &Crash{File: filepath.Base(r.Path), Time: r.Time.Format(time.DateTime)}
+	for i := len(r.Causes) - 1; i >= 0 && out.Culprit == ""; i-- {
+		for _, f := range r.Causes[i].Frames {
+			if jar := classes[f]; jar != "" && !compat.IsPlatform(f) {
+				at, out.Culprit = i, jar
+				break
+			}
+		}
+	}
+	cause := r.Causes[at]
+	out.Error = cause.Short()
+	primary, _ := cause.Missing()
+	for _, deeper := range r.Causes[at+1:] {
+		if m, ok := deeper.Missing(); ok && m.Name == "" && m.Owner != primary.Owner {
+			out.RootError = deeper.Short()
+			out.RootMissing = strings.ReplaceAll(m.Owner, "/", ".")
+			out.RootJvmdg = compat.IsJvmdg(m.Owner)
+			out.RootFound = classes[m.Owner] != ""
+			if out.RootJvmdg {
+				out.RootFound = !jvmdgFailed && !slices.ContainsFunc(problems, func(p compat.Problem) bool {
+					return p.Jar == out.Culprit && p.Kind == compat.KindJvmdg
+				})
+			}
+			break
+		}
+	}
+	for _, m := range pack.Snapshot() {
+		if m.FileName == out.Culprit {
+			if st, err := os.Stat(m.Path); err == nil && st.ModTime().After(r.Time) {
+				return nil, nil
+			}
+		}
+	}
+	stale := modsChangedAt(pack.ModsDir).After(r.Time) && (out.RootMissing == "" || out.RootFound)
+	own := func(kind compat.Kind, match func(d string) bool) *compat.Problem {
+		for _, p := range problems {
+			if p.Jar == out.Culprit && p.Kind == kind && (match == nil || slices.ContainsFunc(p.Details, match)) {
+				return &p
+			}
+		}
+		return nil
+	}
+	missing, ok := cause.Missing()
+	switch {
+	case !ok:
+		out.Missing = cause.Message
+		if len(out.Missing) > 300 {
+			out.Missing = out.Missing[:300] + "…"
+		}
+	case missing.Name == "":
+		out.Missing = strings.ReplaceAll(missing.Owner, "/", ".")
+		if out.Jvmdg = compat.IsJvmdg(missing.Owner); out.Jvmdg && stale && !jvmdgFailed && own(compat.KindJvmdg, nil) == nil {
+			return nil, nil
+		}
+		if !out.Jvmdg && stale && classes[missing.Owner] != "" {
+			return nil, nil
+		}
+	default:
+		simple := missing.Owner[strings.LastIndex(missing.Owner, "/")+1:]
+		out.Missing = strings.TrimPrefix(simple+"."+missing.Name, ".")
+		if out.Error != "NoSuchFieldError" {
+			out.Missing += "()"
+		}
+		p := own(compat.KindAPI, func(d string) bool {
+			if simple == "" {
+				return strings.HasSuffix(d, "."+missing.Name) || strings.HasSuffix(d, "."+missing.Name+"()")
+			}
+			return d == simple+"."+missing.Name || d == simple+"."+missing.Name+"()"
+		})
+		switch {
+		case p != nil:
+			out.Cause = p.Cause
+		case stale && missing.Owner != "" && !compat.IsPlatform(missing.Owner) && out.Culprit != "":
+			return nil, nil
+		default:
+			out.Cause = classes[missing.Owner]
+		}
+	}
+	logx.Printf("crash %s: %s %s in %s, cause %q", out.File, out.Error, out.Missing, out.Culprit, out.Cause)
+	return out, nil
+}
+
+func (a *App) SetSide(key, side string) (string, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return "", errors.New("no pack loaded")
+	}
+	if side != "" && side != server.SideClient && side != server.SideServer && side != server.SideBoth {
+		return "", fmt.Errorf("unknown side %q", side)
+	}
+	if err := a.store.SetSide(pack.Root, key, side); err != nil {
+		return "", err
+	}
+	return pack.SetSide(key, side), nil
+}
+
+type Orphan struct {
+	ID   string   `json:"id"`
+	Name string   `json:"name"`
+	By   []string `json:"by"`
+}
+
+type Kept struct {
+	Name  string `json:"name"`
+	Users int    `json:"users"`
+}
+
+type Dependencies struct {
+	Orphans    []Orphan `json:"orphans"`
+	Kept       []Kept   `json:"kept"`
+	Dependents []string `json:"dependents"`
+	Users      []string `json:"users"`
+}
+
+func (a *App) Orphans(id string) (*Dependencies, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	a.compatProblems(a.ctx, pack)
+	a.compatMu.Lock()
+	needs, has, declares, uses := a.compatNeeds, a.compatHas, a.compatMods, a.compatUses
+	a.compatMu.Unlock()
+	byFile := map[string]resolve.Mod{}
+	var target string
+	for _, m := range pack.Snapshot() {
+		byFile[m.FileName] = m
+		if m.ID == id {
+			target = m.FileName
+		}
+	}
+	if target == "" {
+		return nil, errors.New("mod not found")
+	}
+	gone := map[string]bool{target: true}
+	providers := func(need string) []string {
+		var out []string
+		for file, ids := range has {
+			if !gone[file] && slices.Contains(ids, need) {
+				out = append(out, file)
+			}
+		}
+		return out
+	}
+	owner := func(need string) string {
+		list := providers(need)
+		if len(list) == 1 {
+			return list[0]
+		}
+		var declared []string
+		for _, file := range list {
+			if slices.Contains(declares[file], need) {
+				declared = append(declared, file)
+			}
+		}
+		if len(declared) == 1 {
+			return declared[0]
+		}
+		return ""
+	}
+	usedBy := func(file string) []string {
+		var out []string
+		for other, list := range needs {
+			if !gone[other] && other != file && (slices.ContainsFunc(list, func(need string) bool { return owner(need) == file }) || slices.Contains(uses[other], file)) {
+				out = append(out, other)
+			}
+		}
+		return out
+	}
+	deps := &Dependencies{}
+	for _, need := range needs[target] {
+		if file := owner(need); file != "" && file != target && !slices.ContainsFunc(deps.Kept, func(k Kept) bool { return k.Name == byFile[file].Name }) {
+			deps.Kept = append(deps.Kept, Kept{Name: byFile[file].Name, Users: len(usedBy(file))})
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for file := range has {
+			if gone[file] || byFile[file].ID == "" {
+				continue
+			}
+			var by []string
+			for g := range gone {
+				if slices.ContainsFunc(needs[g], func(need string) bool { return owner(need) == file }) {
+					by = append(by, byFile[g].Name)
+				}
+			}
+			if len(by) == 0 || len(usedBy(file)) > 0 {
+				continue
+			}
+			slices.Sort(by)
+			gone[file], changed = true, true
+			deps.Orphans = append(deps.Orphans, Orphan{ID: byFile[file].ID, Name: byFile[file].Name, By: by})
+		}
+	}
+	deps.Kept = slices.DeleteFunc(deps.Kept, func(k Kept) bool {
+		return slices.ContainsFunc(deps.Orphans, func(o Orphan) bool { return o.Name == k.Name })
+	})
+	gone = map[string]bool{target: true}
+	for file, list := range needs {
+		if file == target {
+			continue
+		}
+		if slices.ContainsFunc(list, func(need string) bool { return slices.Contains(has[target], need) && len(providers(need)) == 0 }) {
+			deps.Dependents = append(deps.Dependents, byFile[file].Name)
+		}
+	}
+	for file, list := range uses {
+		if file != target && slices.Contains(list, target) && !slices.Contains(deps.Dependents, byFile[file].Name) && byFile[file].Name != "" {
+			deps.Users = append(deps.Users, byFile[file].Name)
+		}
+	}
+	byName := func(x, y string) int { return strings.Compare(strings.ToLower(x), strings.ToLower(y)) }
+	slices.SortFunc(deps.Orphans, func(x, y Orphan) int { return byName(x.Name, y.Name) })
+	slices.SortFunc(deps.Kept, func(x, y Kept) int { return byName(x.Name, y.Name) })
+	slices.SortFunc(deps.Dependents, byName)
+	slices.SortFunc(deps.Users, byName)
+	return deps, nil
+}
+
+type RemoveResult struct {
+	Removed []string        `json:"removed"`
+	Failed  []string        `json:"failed"`
+	Server  []server.Result `json:"server"`
+}
+
+func (a *App) Remove(ids []string) (*RemoveResult, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	dir, err := config.BackupDir()
+	if err != nil {
+		return nil, err
+	}
+	ctx, err := a.joinOp()
+	if err != nil {
+		return nil, err
+	}
+	defer a.leaveOp()
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	var mods []*resolve.Mod
+	for _, m := range pack.List() {
+		if want[m.ID] {
+			mods = append(mods, m)
+		}
+	}
+	if err := install.CheckNotInUse(mods); err != nil {
+		return nil, err
+	}
+	a.post.Lock()
+	defer a.post.Unlock()
+	session := backup.Begin(dir, pack.Root)
+	out := &RemoveResult{}
+	var gone []server.Mod
+	for _, m := range mods {
+		item := backup.Item{Key: m.Key, Name: m.Name, Dir: filepath.Dir(m.Path), OldFile: m.FileName, From: m.Version, Removed: true}
+		if m.Jar != nil {
+			item.ModIDs = m.Jar.ModIDs
+		}
+		if _, err := session.Keep(fsx.Local, m.Path, "", &item); err != nil {
+			logx.Printf("remove %s: %v", m.FileName, err)
+			out.Failed = append(out.Failed, fmt.Sprintf("%s (%v)", m.Name, err))
+			continue
+		}
+		session.Add(item)
+		pack.Remove(m.Path)
+		out.Removed = append(out.Removed, m.ID)
+		logx.Printf("removed %s", m.FileName)
+		mod := server.Mod{Name: m.Name, FileName: m.FileName, Key: m.Key}
+		if m.Jar != nil && len(m.Jar.ModIDs) > 0 {
+			mod.ModID = m.Jar.ModIDs[0]
+		}
+		gone = append(gone, mod)
+	}
+	if root := a.serverRoot(); root != "" && len(gone) > 0 {
+		results, err := server.Remove(ctx, root, gone, server.Snapshot(pack), session, pack.MCVersion)
+		if err != nil {
+			logx.Printf("server remove: %v", err)
+			out.Failed = append(out.Failed, "server ("+err.Error()+")")
+		}
+		out.Server = results
+	}
+	if err := session.Save(); err != nil {
+		logx.Printf("backup session not saved: %v", err)
+	}
+	return out, nil
+}
+
+func modsChangedAt(dir string) time.Time {
+	var newest time.Time
+	note := func(p string) {
+		if st, err := os.Stat(p); err == nil && st.ModTime().After(newest) {
+			newest = st.ModTime()
+		}
+	}
+	note(dir)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		note(p)
+		if e.IsDir() && fsx.IsVersionDir(e.Name()) {
+			sub, _ := os.ReadDir(p)
+			for _, s := range sub {
+				note(filepath.Join(p, s.Name()))
+			}
+		}
+	}
+	return newest
+}
+
+func (a *App) DismissCrash(file string) error {
+	return a.store.SetCrashSeen(a.packRoot(), file)
+}
+
+func (a *App) OpenCrash(file string) {
+	if file != filepath.Base(file) {
+		return
+	}
+	opener.Open(filepath.Join(a.packRoot(), "crash-reports", file))
 }
 
 func compatLoad(inputs []compatInput, cacheDir string) []compat.Jar {
@@ -677,7 +1127,7 @@ func compatLoad(inputs []compatInput, cacheDir string) []compat.Jar {
 			}
 			jars[i] = compat.Jar{Name: in.name, Path: in.path, Index: x}
 			if in.jar != nil {
-				jars[i].ModIDs, jars[i].Requires, jars[i].DeclaresDeps = in.jar.ModIDs, in.jar.Requires, in.jar.DeclaresDeps
+				jars[i].ModIDs, jars[i].Requires = in.jar.ModIDs, in.jar.Requires
 			}
 		})
 	}
@@ -731,7 +1181,7 @@ func (a *App) compatWarnings(ctx context.Context, pack *resolve.Pack, done []ins
 			x, err := compat.Load(in.path, in.key, cacheDir)
 			j, jerr := jarinfo.Read(in.path)
 			if err == nil && jerr == nil {
-				own = compat.Introduced(problems, r.FileTo, compat.Jar{Name: r.FileTo, Index: x, ModIDs: j.ModIDs, Requires: j.Requires, DeclaresDeps: j.DeclaresDeps})
+				own = compat.Introduced(problems, r.FileTo, compat.Jar{Name: r.FileTo, Index: x, ModIDs: j.ModIDs, Requires: j.Requires})
 			}
 		}
 		if text := compat.Summary(r.FileTo, own); text != "" {
@@ -748,6 +1198,7 @@ func (a *App) recheckOptions(root string) resolve.Options {
 		CurseForgeKey: a.store.CurseForgeKey(),
 		CacheDir:      cacheDir,
 		Skipped:       func(key string) bool { return a.store.Skipped(root, key) },
+		Side:          func(key string) string { return a.store.Side(root, key) },
 	}
 }
 
@@ -910,10 +1361,30 @@ func (a *App) LastUpdate() (*LastUpdate, error) {
 	for _, s := range all {
 		for _, it := range s.Pending() {
 			it.Time = s.Time
+			if it.Removed && it.Remote == "" && len(it.ModIDs) == 0 {
+				it.ModIDs = a.removedModIDs(s.Stored(it))
+			}
 			last.Restorable = append(last.Restorable, it)
 		}
 	}
 	return last, nil
+}
+
+func (a *App) removedModIDs(path string) []string {
+	a.mu.Lock()
+	ids, ok := a.removedIDs[path]
+	a.mu.Unlock()
+	if ok {
+		return ids
+	}
+	ids, _ = jarinfo.ModIDs(path)
+	a.mu.Lock()
+	if a.removedIDs == nil {
+		a.removedIDs = map[string][]string{}
+	}
+	a.removedIDs[path] = ids
+	a.mu.Unlock()
+	return ids
 }
 
 type UndoResult struct {
@@ -949,13 +1420,15 @@ func (a *App) Undo(ids []string) (*UndoResult, error) {
 	}
 	a.post.Unlock()
 	moved := map[string]string{}
-	var removed []string
+	var removed, returned []string
 	for _, r := range results {
 		logx.Printf("undo %s: %s -> %s, ok=%v %s", r.Name, r.From, r.To, r.OK, r.Error)
 		switch {
 		case !r.OK || strings.HasPrefix(r.Key, server.KeyPrefix):
 		case r.Added:
 			removed = append(removed, filepath.Join(r.Dir, r.NewFile))
+		case r.Removed:
+			returned = append(returned, filepath.Join(r.Dir, r.File))
 		default:
 			moved[filepath.Join(r.Dir, r.NewFile)] = filepath.Join(r.Dir, r.File)
 		}
@@ -964,8 +1437,11 @@ func (a *App) Undo(ids []string) (*UndoResult, error) {
 	a.mu.Lock()
 	pack := a.pack
 	a.mu.Unlock()
-	if pack == nil || len(moved) == 0 && len(removed) == 0 {
+	if pack == nil || len(moved) == 0 && len(removed) == 0 && len(returned) == 0 {
 		return out, nil
+	}
+	for _, path := range returned {
+		out.Mods = append(out.Mods, resolve.Replaced{Mod: pack.Add(context.WithoutCancel(ctx), path, a.recheckOptions(pack.Root))})
 	}
 	for _, path := range removed {
 		if id := pack.Remove(path); id != "" {
@@ -1047,15 +1523,25 @@ func (a *App) SyncServer() (*ServerSync, error) {
 		return nil, err
 	}
 	defer a.end()
+	a.mu.Lock()
+	a.syncing = true
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.syncing = false
+		a.mu.Unlock()
+	}()
 	dir, err := config.BackupDir()
 	if err != nil {
 		return nil, err
 	}
 	session := backup.Begin(dir, pack.Root)
 	out := a.syncServer(ctx, server.Snapshot(pack), pack.MCVersion, session, nil)
+	a.post.Lock()
 	if err := session.Save(); err != nil {
 		logx.Printf("backup session not saved: %v", err)
 	}
+	a.post.Unlock()
 	if out == nil {
 		return nil, errors.New("no server folder")
 	}

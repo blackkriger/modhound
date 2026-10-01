@@ -11,9 +11,11 @@ import (
 )
 
 type Pack struct {
-	Skip      []string `json:"skip"`
-	Server    *string  `json:"server,omitempty"`
-	ServerKey string   `json:"serverKey,omitempty"`
+	Skip      []string          `json:"skip"`
+	Server    *string           `json:"server,omitempty"`
+	ServerKey string            `json:"serverKey,omitempty"`
+	CrashSeen string            `json:"crashSeen,omitempty"`
+	Sides     map[string]string `json:"sides,omitempty"`
 }
 
 type Config struct {
@@ -139,6 +141,7 @@ func (s *Store) Get() Config {
 	for k, p := range s.cfg.Packs {
 		cp := *p
 		cp.Skip = slices.Clone(p.Skip)
+		cp.Sides = maps.Clone(p.Sides)
 		c.Packs[k] = &cp
 	}
 	return c
@@ -166,11 +169,7 @@ func (s *Store) Skipped(pack, key string) bool {
 
 func (s *Store) SetSkipped(pack, key string, skip bool) error {
 	return s.Update(func(c *Config) {
-		p := c.Packs[pack]
-		if p == nil {
-			p = &Pack{}
-			c.Packs[pack] = p
-		}
+		p := s.pack(c, pack)
 		p.Skip = slices.DeleteFunc(p.Skip, func(k string) bool { return k == key })
 		if skip {
 			p.Skip = append(p.Skip, key)
@@ -191,11 +190,7 @@ func (s *Store) Server(pack string) (string, bool) {
 
 func (s *Store) SetServer(pack, dir string) error {
 	return s.Update(func(c *Config) {
-		p := c.Packs[pack]
-		if p == nil {
-			p = &Pack{}
-			c.Packs[pack] = p
-		}
+		p := s.pack(c, pack)
 		p.Server = &dir
 	})
 }
@@ -211,12 +206,53 @@ func (s *Store) ServerKey(pack string) string {
 
 func (s *Store) SetServerKey(pack, key string) error {
 	return s.Update(func(c *Config) {
-		p := c.Packs[pack]
-		if p == nil {
-			p = &Pack{}
-			c.Packs[pack] = p
-		}
+		p := s.pack(c, pack)
 		p.ServerKey = key
+	})
+}
+
+func (s *Store) pack(c *Config, pack string) *Pack {
+	p := c.Packs[pack]
+	if p == nil {
+		p = &Pack{}
+		c.Packs[pack] = p
+	}
+	return p
+}
+
+func (s *Store) CrashSeen(pack string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.cfg.Packs[pack]; p != nil {
+		return p.CrashSeen
+	}
+	return ""
+}
+
+func (s *Store) SetCrashSeen(pack, file string) error {
+	return s.Update(func(c *Config) { s.pack(c, pack).CrashSeen = file })
+}
+
+func (s *Store) Side(pack, key string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.cfg.Packs[pack]; p != nil {
+		return p.Sides[key]
+	}
+	return ""
+}
+
+func (s *Store) SetSide(pack, key, side string) error {
+	return s.Update(func(c *Config) {
+		p := s.pack(c, pack)
+		if side == "" {
+			delete(p.Sides, key)
+			return
+		}
+		if p.Sides == nil {
+			p.Sides = map[string]string{}
+		}
+		p.Sides[key] = side
 	})
 }
 

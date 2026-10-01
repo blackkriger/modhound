@@ -50,6 +50,8 @@ type Project struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	IconURL     string `json:"icon_url"`
+	ClientSide  string `json:"client_side"`
+	ServerSide  string `json:"server_side"`
 }
 
 func do(ctx context.Context, method, path string, body, out any) error {

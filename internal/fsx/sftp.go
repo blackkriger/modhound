@@ -330,6 +330,18 @@ func (f *sftpFS) Exists(p string) bool {
 	}) == nil
 }
 
+func (f *sftpFS) Lookup(p string) (bool, error) {
+	err := f.do(true, func(sc *sftp.Client) error {
+		_, err := sc.Stat(p)
+		return err
+	})
+	var status *sftp.StatusError
+	if os.IsNotExist(err) || errors.As(err, &status) && status.Code == 2 {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (f *sftpFS) Rename(from, to string) error {
 	return f.do(false, func(sc *sftp.Client) error { return sc.Rename(from, to) })
 }

@@ -48,18 +48,17 @@ func (l *StringList) UnmarshalJSON(b []byte) error {
 }
 
 type Jar struct {
-	Size         int64
-	SHA1         string
-	SHA512       string
-	Murmur2      uint32
-	Info         *ModInfo
-	Logo         []byte
-	LogoType     string
-	ModIDs       []string
-	Requires     []string
-	DeclaresDeps []string
-	ClassMajor   int
-	Valid        bool
+	Size       int64
+	SHA1       string
+	SHA512     string
+	Murmur2    uint32
+	Info       *ModInfo
+	Logo       []byte
+	LogoType   string
+	ModIDs     []string
+	Requires   []string
+	ClassMajor int
+	Valid      bool
 }
 
 const maxLogoSize = 1 << 20
@@ -114,9 +113,8 @@ func parse(data []byte, withSHA512 bool) *Jar {
 			if mi.ModID != "" {
 				j.ModIDs = append(j.ModIDs, mi.ModID)
 			}
-			if mi.UseDeps && mi.ModID != "" {
+			if mi.UseDeps {
 				j.Requires = append(j.Requires, mi.Required...)
-				j.DeclaresDeps = append(j.DeclaresDeps, strings.ToLower(mi.ModID))
 			}
 		}
 	}
@@ -259,4 +257,24 @@ func Murmur2(data []byte) uint32 {
 	h *= m
 	h ^= h >> 15
 	return h
+}
+
+func ModIDs(p string) ([]string, error) {
+	z, err := zip.OpenReader(p)
+	if err != nil {
+		return nil, err
+	}
+	defer z.Close()
+	var ids []string
+	for _, f := range z.File {
+		if f.Name != "mcmod.info" {
+			continue
+		}
+		for _, mi := range parseModInfo(readAll(f, 1<<20)) {
+			if mi.ModID != "" {
+				ids = append(ids, mi.ModID)
+			}
+		}
+	}
+	return ids, nil
 }

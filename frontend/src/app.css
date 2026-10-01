@@ -296,6 +296,14 @@ html, body {
     cursor: pointer;
 }
 
+.m3-crash .m3-reason {
+    overflow-wrap: anywhere;
+}
+
+.m3-sep-note {
+    order: 2;
+}
+
 .m3-sort:hover {
     color: var(--fg);
 }

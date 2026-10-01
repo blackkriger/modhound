@@ -68,6 +68,8 @@ type Mod struct {
 	Reason      string    `json:"reason"`
 	Target      *Target   `json:"target"`
 	Skipped     bool      `json:"skipped"`
+	Side        string    `json:"side"`
+	SideSet     bool      `json:"sideSet"`
 	Size        int64     `json:"size"`
 	Debug       *ModDebug `json:"debug,omitempty"`
 
@@ -80,6 +82,7 @@ type Mod struct {
 	gt          *gtnh.Hit
 	choices     map[string]choice
 	chosen      bool
+	autoSide    string
 }
 
 type ModDebug struct {
@@ -197,6 +200,7 @@ type Options struct {
 	CurseForgeKey string
 	CacheDir      string
 	Skipped       func(key string) bool
+	Side          func(key string) string
 	Progress      func(stage string, done, total int)
 	OnMod         func(m *Mod)
 	OnMatched     func(gtnh, curseforge, modrinth int)
@@ -576,6 +580,11 @@ func (r *resolver) finish(m *Mod) {
 	if r.opts.Skipped != nil {
 		m.Skipped = r.opts.Skipped(m.Key)
 	}
+	if r.opts.Side != nil {
+		if side := r.opts.Side(m.Key); side != "" {
+			m.Side, m.SideSet = side, true
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.done++
@@ -934,6 +943,8 @@ func fillMeta(m *Mod, mcVersion string, cfMods map[int]curseforge.Mod, mrProject
 		if m.Source == SourceModrinth {
 			m.URL = modrinth.ProjectURL(mrp.Slug)
 		}
+		m.Side = modrinthSide(mrp.ClientSide, mrp.ServerSide)
+		m.autoSide = m.Side
 	}
 	if info != nil {
 		m.Name = first(m.Name, info.Name)
@@ -955,6 +966,21 @@ func fillMeta(m *Mod, mcVersion string, cfMods map[int]curseforge.Mod, mrProject
 		m.Version = info.Version
 	}
 	m.Name = first(m.Name, strings.TrimSuffix(strings.TrimSuffix(m.FileName, ".jar"), ".zip"))
+}
+
+func modrinthSide(client, server string) string {
+	supported := func(v string) bool { return v == "required" || v == "optional" }
+	switch {
+	case server == "required" && supported(client):
+		return "both"
+	case supported(server) && client == "unsupported":
+		return "server"
+	case server == "required":
+		return "server"
+	case supported(client) && server == "unsupported":
+		return "client"
+	}
+	return ""
 }
 
 func first(values ...string) string {

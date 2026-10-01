@@ -174,3 +174,42 @@ func TestOnlyKeepsUpdatedMods(t *testing.T) {
 		t.Fatalf("items = %+v", d.Items)
 	}
 }
+
+func TestSidesInCompare(t *testing.T) {
+	base := t.TempDir()
+	client := filepath.Join(base, "client", "mods")
+	srv := filepath.Join(base, "server", "mods")
+	os.MkdirAll(client, 0o755)
+	os.MkdirAll(srv, 0o755)
+	writeJar(t, filepath.Join(client, "Minimap-2.0.jar"), "minimap", "new")
+	writeJar(t, filepath.Join(srv, "Minimap-1.0.jar"), "minimap", "old")
+	writeJar(t, filepath.Join(client, "Shared-1.0.jar"), "shared", "x")
+	writeJar(t, filepath.Join(client, "Renamed-2.0.jar"), "renamed", "x")
+	writeJar(t, filepath.Join(srv, "RenamedOld-1.0.jar"), "renamed", "x")
+	writeJar(t, filepath.Join(client, "Unknown-1.0.jar"), "unknown", "x")
+
+	sides := map[string]string{"Minimap-2.0.jar": SideClient, "Shared-1.0.jar": SideBoth, "Renamed-2.0.jar": SideServer}
+	var mods []Mod
+	for _, m := range Snapshot(clientPack(t, client)) {
+		m.Side = sides[m.FileName]
+		mods = append(mods, m)
+	}
+	diff, err := Compare(mods, "1.7.10", filepath.Dir(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.Items) != 1 || !diff.Items[0].add || diff.Items[0].ClientFile != "Shared-1.0.jar" {
+		t.Fatalf("items: %+v", diff.Items)
+	}
+	session := backup.Begin(t.TempDir(), base)
+	results, err := Sync(context.Background(), diff, session, "1.7.10")
+	if err != nil || len(results) != 1 || !results[0].OK {
+		t.Fatalf("sync: %+v %v", results, err)
+	}
+	if _, err := os.Stat(filepath.Join(srv, "Shared-1.0.jar")); err != nil {
+		t.Fatal("added mod is not on the server")
+	}
+	if items := session.Pending(); len(items) != 1 || !items[0].Added {
+		t.Fatalf("backup: %+v", items)
+	}
+}

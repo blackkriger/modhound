@@ -4,7 +4,7 @@ param([switch]$Resources)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$version = "0.3.0"
+$version = "0.4.0"
 $exe = "build\bin\modhound.exe"
 
 if ($Resources) {

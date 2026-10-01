@@ -55,6 +55,22 @@ func (p *Pack) SetSkipped(key string, skip bool) {
 	}
 }
 
+func (p *Pack) SetSide(key, side string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	effective := side
+	for _, m := range p.Mods {
+		if m.Key == key {
+			m.Side, m.SideSet = side, side != ""
+			if side == "" {
+				m.Side = m.autoSide
+			}
+			effective = m.Side
+		}
+	}
+	return effective
+}
+
 func (p *Pack) List() []*Mod {
 	p.mu.Lock()
 	defer p.mu.Unlock()

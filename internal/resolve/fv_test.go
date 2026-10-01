@@ -55,3 +55,21 @@ func TestOlderVersion(t *testing.T) {
 		t.Error("non-numeric versions are not compared")
 	}
 }
+
+func TestModrinthSide(t *testing.T) {
+	cases := [][3]string{
+		{"required", "required", "both"},
+		{"optional", "required", "both"},
+		{"required", "optional", ""},
+		{"optional", "optional", ""},
+		{"required", "unsupported", "client"},
+		{"unsupported", "required", "server"},
+		{"required", "unknown", ""},
+		{"unknown", "unknown", ""},
+	}
+	for _, c := range cases {
+		if got := modrinthSide(c[0], c[1]); got != c[2] {
+			t.Fatalf("modrinthSide(%s, %s) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+}

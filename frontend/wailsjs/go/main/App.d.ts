@@ -22,7 +22,11 @@ export function ChooseVersion(arg1:string,arg2:string):Promise<resolve.Mod>;
 
 export function Compat():Promise<Array<compat.Problem>>;
 
+export function Crash():Promise<main.Crash>;
+
 export function DefaultPack():Promise<string>;
+
+export function DismissCrash(arg1:string):Promise<void>;
 
 export function FindMissing(arg1:string):Promise<resolve.Offer>;
 
@@ -34,11 +38,17 @@ export function LastUpdate():Promise<main.LastUpdate>;
 
 export function LogFrontend(arg1:string):Promise<void>;
 
+export function OpenCrash(arg1:string):Promise<void>;
+
 export function OpenLogFolder():Promise<void>;
 
 export function OpenReport(arg1:string):Promise<void>;
 
 export function OpenURL(arg1:string):Promise<void>;
+
+export function Orphans(arg1:string):Promise<main.Dependencies>;
+
+export function Remove(arg1:Array<string>):Promise<main.RemoveResult>;
 
 export function SaveSettings(arg1:string,arg2:string,arg3:boolean,arg4:string,arg5:string):Promise<void>;
 
@@ -47,6 +57,8 @@ export function SelectPack(arg1:string):Promise<void>;
 export function ServerBehind():Promise<number>;
 
 export function SetConsoleOpen(arg1:boolean):Promise<void>;
+
+export function SetSide(arg1:string,arg2:string):Promise<string>;
 
 export function SetSkipped(arg1:string,arg2:boolean):Promise<void>;
 

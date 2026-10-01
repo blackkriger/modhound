@@ -42,6 +42,7 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 22, G: 22, B: 22, A: 255},
 		OnStartup:        app.startup,
 		OnBeforeClose:    app.beforeClose,
+		OnShutdown:       app.shutdown,
 		Bind:             []interface{}{app},
 		Windows:          &windows.Options{Theme: windows.SystemDefault},
 	})

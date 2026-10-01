@@ -19,18 +19,21 @@ import (
 )
 
 type Item struct {
-	Key      string `json:"key"`
-	Name     string `json:"name"`
-	Dir      string `json:"dir"`
-	OldFile  string `json:"oldFile"`
-	Stored   string `json:"stored"`
-	NewFile  string `json:"newFile"`
-	From     string `json:"from"`
-	To       string `json:"to"`
-	Restored bool   `json:"restored"`
-	Added    bool   `json:"added,omitempty"`
-	Time     string `json:"time,omitempty"`
-	Remote   string `json:"remote,omitempty"`
+	Key      string   `json:"key"`
+	Name     string   `json:"name"`
+	Dir      string   `json:"dir"`
+	OldFile  string   `json:"oldFile"`
+	Stored   string   `json:"stored"`
+	NewFile  string   `json:"newFile"`
+	From     string   `json:"from"`
+	To       string   `json:"to"`
+	Restored bool     `json:"restored"`
+	Added    bool     `json:"added,omitempty"`
+	Removed  bool     `json:"removed,omitempty"`
+	ModIDs   []string `json:"modIds,omitempty"`
+	Pair     string   `json:"pair,omitempty"`
+	Time     string   `json:"time,omitempty"`
+	Remote   string   `json:"remote,omitempty"`
 }
 
 func (it Item) files() (fsx.FS, error) {
@@ -39,6 +42,49 @@ func (it Item) files() (fsx.FS, error) {
 	}
 	f, _, err := fsx.Open(it.Remote)
 	return f, err
+}
+
+func (s *Session) waitingPairs() map[string]bool {
+	out := map[string]bool{}
+	for _, it := range s.Items {
+		if it.Pair != "" && !it.Restored {
+			out[it.Pair] = true
+			out["removed|"+it.Pair] = true
+		}
+	}
+	return out
+}
+
+func (s *Session) pairRestored(it Item) bool {
+	for _, other := range s.Items {
+		if other.Restored && it.Pair != "" && (other.UndoKey() == it.Pair || "removed|"+it.Pair == other.UndoKey()) {
+			return true
+		}
+	}
+	return false
+}
+
+func modBack(it Item) bool {
+	f, err := it.files()
+	if err != nil {
+		return false
+	}
+	return f.Exists(f.Join(it.Dir, it.OldFile)) || otherVersion(f, it) != ""
+}
+
+func RemovedKey(key, file string) string {
+	return "removed|" + key + "|" + file
+}
+
+func (it Item) UndoKey() string {
+	if it.Removed {
+		return RemovedKey(it.Key, it.OldFile)
+	}
+	return it.Key + "|" + it.NewFile
+}
+
+func (it Item) pairedWith(keys map[string]bool) bool {
+	return it.Pair != "" && (keys[it.Pair] || keys["removed|"+it.Pair])
 }
 
 func (it Item) chain(file string) string {
@@ -79,7 +125,7 @@ func packDir(root, pack string) string {
 
 func Begin(root, pack string) *Session {
 	now := time.Now()
-	id := now.Format("2006-01-02_15-04-05.000")
+	id := SessionID(now)
 	return &Session{ID: id, Time: now.Format(time.DateTime), Pack: pack, dir: filepath.Join(packDir(root, pack), id)}
 }
 
@@ -151,7 +197,9 @@ func prune(dir, newest string) {
 	for _, s := range sessions {
 		if s.ID == newest {
 			for _, it := range s.Items {
-				replaced[it.chain(it.OldFile)] = true
+				if !it.Added && !it.Removed {
+					replaced[it.chain(it.OldFile)] = true
+				}
 			}
 		}
 	}
@@ -160,13 +208,14 @@ func prune(dir, newest string) {
 			continue
 		}
 		changed := false
+		waiting := s.waitingPairs()
 		kept := s.Items[:0]
 		for _, it := range s.Items {
-			if it.Restored {
+			if it.Restored && !waiting[it.UndoKey()] {
 				changed = true
 				continue
 			}
-			if replaced[it.chain(it.NewFile)] {
+			if !it.Restored && !it.Removed && replaced[it.chain(it.NewFile)] {
 				if err := s.discard(it); err != nil {
 					logx.Printf("old backup %s not removed, kept for later: %v", it.Stored, err)
 				} else {
@@ -194,8 +243,8 @@ func (s *Session) discard(it Item) error {
 		return err
 	}
 	stored := s.Stored(it)
-	if !f.Exists(stored) {
-		return nil
+	if exists, err := f.Lookup(stored); err != nil || !exists {
+		return err
 	}
 	if err := f.Remove(stored); err != nil {
 		return err
@@ -245,10 +294,10 @@ func (s *Session) Restore(keys map[string]bool) []Result {
 	var results []Result
 	for i := range s.Items {
 		it := &s.Items[i]
-		if it.Restored || (keys != nil && !keys[it.Key+"|"+it.NewFile]) {
+		if it.Restored || (keys != nil && !keys[it.UndoKey()] && !it.pairedWith(keys)) {
 			continue
 		}
-		res := Result{Key: it.Key, Name: it.Name, From: it.To, To: it.From, File: it.OldFile, Added: it.Added, Dir: it.Dir, NewFile: it.NewFile}
+		res := Result{Key: it.Key, Name: it.Name, From: it.To, To: it.From, File: it.OldFile, Added: it.Added, Removed: it.Removed, Dir: it.Dir, NewFile: it.NewFile}
 		if err := s.restore(*it); err != nil {
 			res.Error = err.Error()
 		} else {
@@ -271,14 +320,15 @@ func (s *Session) Restore(keys map[string]bool) []Result {
 }
 
 type Result struct {
-	Key   string `json:"key"`
-	Name  string `json:"name"`
-	From  string `json:"from"`
-	To    string `json:"to"`
-	File  string `json:"file"`
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
-	Added bool   `json:"added"`
+	Key     string `json:"key"`
+	Name    string `json:"name"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	File    string `json:"file"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
+	Added   bool   `json:"added"`
+	Removed bool   `json:"removed"`
 
 	Dir     string `json:"-"`
 	NewFile string `json:"-"`
@@ -299,6 +349,22 @@ func (s *Session) restore(it Item) error {
 	stored := s.Stored(it)
 	if !f.Exists(stored) {
 		return errors.New("the saved copy is missing")
+	}
+	if it.Removed {
+		original := f.Join(it.Dir, it.OldFile)
+		if f.Exists(original) {
+			return fmt.Errorf("%s already exists", it.OldFile)
+		}
+		if other := otherVersion(f, it); other != "" {
+			return fmt.Errorf("%s is in the folder now, restoring %s would leave two versions of the mod", other, it.OldFile)
+		}
+		if err := f.Rename(stored, original); err != nil {
+			return fmt.Errorf("cannot put the file back: %w", err)
+		}
+		if it.Remote != "" {
+			f.RemoveEmptyDir(f.Dir(stored))
+		}
+		return nil
 	}
 	original := f.Join(it.Dir, it.OldFile)
 	if !strings.EqualFold(current, original) && f.Exists(original) {
@@ -338,4 +404,55 @@ func otherVersion(f fsx.FS, it Item) string {
 		}
 	}
 	return ""
+}
+
+func PurgeRemoved(root, pack string, remote bool, before string) int {
+	var sessions []*Session
+	for _, s := range load(packDir(root, pack)) {
+		if before == "" || s.ID < before {
+			sessions = append(sessions, s)
+		}
+	}
+	purged := 0
+	gone := map[string]bool{}
+	sweep := func(drop func(it Item) bool, dropped func(it Item)) {
+		for _, s := range sessions {
+			waiting := map[string]bool{}
+			for _, it := range s.Items {
+				waiting[it.UndoKey()] = it.Pair != "" && !it.Restored && s.pairRestored(it) && !modBack(it)
+			}
+			kept := s.Items[:0]
+			changed := false
+			for _, it := range s.Items {
+				if (it.Remote != "") == remote && !it.Restored && !waiting[it.UndoKey()] && drop(it) {
+					if err := s.discard(it); err != nil {
+						logx.Printf("backup %s not purged: %v", it.Stored, err)
+						kept = append(kept, it)
+						continue
+					}
+					dropped(it)
+					changed = true
+					continue
+				}
+				kept = append(kept, it)
+			}
+			s.Items = kept
+			switch {
+			case len(s.Items) == 0:
+				os.RemoveAll(s.dir)
+			case changed:
+				s.write()
+			}
+		}
+	}
+	sweep(func(it Item) bool { return it.Removed }, func(it Item) {
+		gone[it.chain(it.OldFile)] = true
+		purged++
+	})
+	sweep(func(it Item) bool { return !it.Removed && !it.Added && gone[it.chain(it.NewFile)] }, func(Item) {})
+	return purged
+}
+
+func SessionID(t time.Time) string {
+	return t.Format("2006-01-02_15-04-05.000")
 }

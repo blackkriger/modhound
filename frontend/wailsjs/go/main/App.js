@@ -38,8 +38,16 @@ export function Compat() {
   return window['go']['main']['App']['Compat']();
 }
 
+export function Crash() {
+  return window['go']['main']['App']['Crash']();
+}
+
 export function DefaultPack() {
   return window['go']['main']['App']['DefaultPack']();
+}
+
+export function DismissCrash(arg1) {
+  return window['go']['main']['App']['DismissCrash'](arg1);
 }
 
 export function FindMissing(arg1) {
@@ -62,6 +70,10 @@ export function LogFrontend(arg1) {
   return window['go']['main']['App']['LogFrontend'](arg1);
 }
 
+export function OpenCrash(arg1) {
+  return window['go']['main']['App']['OpenCrash'](arg1);
+}
+
 export function OpenLogFolder() {
   return window['go']['main']['App']['OpenLogFolder']();
 }
@@ -72,6 +84,14 @@ export function OpenReport(arg1) {
 
 export function OpenURL(arg1) {
   return window['go']['main']['App']['OpenURL'](arg1);
+}
+
+export function Orphans(arg1) {
+  return window['go']['main']['App']['Orphans'](arg1);
+}
+
+export function Remove(arg1) {
+  return window['go']['main']['App']['Remove'](arg1);
 }
 
 export function SaveSettings(arg1, arg2, arg3, arg4, arg5) {
@@ -88,6 +108,10 @@ export function ServerBehind() {
 
 export function SetConsoleOpen(arg1) {
   return window['go']['main']['App']['SetConsoleOpen'](arg1);
+}
+
+export function SetSide(arg1, arg2) {
+  return window['go']['main']['App']['SetSide'](arg1, arg2);
 }
 
 export function SetSkipped(arg1, arg2) {

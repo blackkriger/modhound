@@ -18,6 +18,7 @@ type FS interface {
 	ReadDir(dir string) ([]Entry, error)
 	IsDir(p string) bool
 	Exists(p string) bool
+	Lookup(p string) (bool, error)
 	Rename(from, to string) error
 	Remove(p string) error
 	RemoveEmptyDir(p string)
@@ -107,6 +108,14 @@ func (localFS) IsDir(p string) bool {
 func (localFS) Exists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+func (localFS) Lookup(p string) (bool, error) {
+	_, err := os.Stat(p)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (localFS) Rename(from, to string) error {

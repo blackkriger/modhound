@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const indexVersion = 4
+const indexVersion = 5
 
 type Class struct {
 	Super   string
@@ -35,6 +35,7 @@ type Index struct {
 	Refs    []ref
 	Uses    []string
 	ModIDs  []string
+	Mods    []string
 	Deps    map[string][]string
 	Jvmdg   []string
 	Decls   []DepDecl
@@ -131,6 +132,9 @@ func build(path string) (*Index, error) {
 	jvmdg := map[string]bool{}
 	for _, c := range parsed {
 		x.ModIDs = append(x.ModIDs, c.ModIDs...)
+		if c.Mod != "" {
+			x.Mods = append(x.Mods, c.Mod)
+		}
 		if c.Mod != "" && len(c.Deps) > 0 {
 			id := strings.ToLower(c.Mod)
 			x.Deps[id] = append(x.Deps[id], c.Deps...)

@@ -11,9 +11,10 @@ import (
 type Kind string
 
 const (
-	KindAPI     Kind = "api"
-	KindJvmdg   Kind = "jvmdg"
-	KindMissing Kind = "missing"
+	KindAPI       Kind = "api"
+	KindJvmdg     Kind = "jvmdg"
+	KindMissing   Kind = "missing"
+	KindDuplicate Kind = "duplicate"
 )
 
 type Problem struct {
@@ -25,12 +26,11 @@ type Problem struct {
 }
 
 type Jar struct {
-	Name         string
-	Path         string
-	Index        *Index
-	ModIDs       []string
-	Requires     []string
-	DeclaresDeps []string
+	Name     string
+	Path     string
+	Index    *Index
+	ModIDs   []string
+	Requires []string
 }
 
 type Env struct {
@@ -252,6 +252,29 @@ func (p *pack) jvmdgProblems(env Env, add func(Problem)) {
 	}
 }
 
+func (p *pack) duplicateProblems(add func(Problem)) {
+	byID := map[string][]int{}
+	for i, j := range p.jars {
+		seen := map[string]bool{}
+		for _, id := range j.Index.Mods {
+			id = strings.ToLower(id)
+			if !seen[id] {
+				seen[id] = true
+				byID[id] = append(byID[id], i)
+			}
+		}
+	}
+	for id, list := range byID {
+		for _, i := range list {
+			for _, o := range list {
+				if o != i {
+					add(Problem{Jar: p.jars[i].Name, Kind: KindDuplicate, Cause: p.jars[o].Name, Details: []string{id}})
+				}
+			}
+		}
+	}
+}
+
 func (p *pack) missingProblems(add func(Problem)) {
 	have := map[string]bool{}
 	for _, id := range builtinMods {
@@ -282,10 +305,7 @@ func required(j Jar) []string {
 			out = append(out, modID(id))
 		}
 	}
-	for id, specs := range j.Index.Deps {
-		if slices.Contains(j.DeclaresDeps, id) {
-			continue
-		}
+	for _, specs := range j.Index.Deps {
 		for _, s := range specs {
 			for _, part := range SplitOutsideBrackets(strings.ReplaceAll(s, ";", ",")) {
 				part = strings.TrimSpace(part)
@@ -316,6 +336,7 @@ func Check(jars []Jar, env Env) []Problem {
 	p.apiProblems(add)
 	p.jvmdgProblems(env, add)
 	p.missingProblems(add)
+	p.duplicateProblems(add)
 	return sorted(out)
 }
 
@@ -447,7 +468,7 @@ func Merge(found, introduced []Problem) []Problem {
 }
 
 func Summary(file string, problems []Problem) string {
-	var broken, missingIn, requires []string
+	var broken, missingIn, requires, duplicates []string
 	jvmdg := false
 	for _, p := range problems {
 		switch {
@@ -460,6 +481,8 @@ func Summary(file string, problems []Problem) string {
 			jvmdg = true
 		case p.Kind == KindMissing:
 			requires = append(requires, p.Cause)
+		case p.Kind == KindDuplicate:
+			duplicates = append(duplicates, p.Cause)
 		}
 	}
 	var parts []string
@@ -471,6 +494,9 @@ func Summary(file string, problems []Problem) string {
 	}
 	if jvmdg {
 		parts = append(parts, "needs JvmDowngrader classes the modpack does not have")
+	}
+	if len(duplicates) > 0 {
+		parts = append(parts, "is the same mod as "+strings.Join(uniqueSorted(duplicates), ", "))
 	}
 	if len(requires) > 0 {
 		parts = append(parts, "requires "+strings.Join(uniqueSorted(requires), ", ")+", not in the modpack")
@@ -511,6 +537,73 @@ func Introduced(problems []Problem, file string, old Jar) []Problem {
 			}
 		}
 		out = append(out, p)
+	}
+	return out
+}
+
+func ClassJars(jars []Jar) map[string]string {
+	p := newPack(jars)
+	out := make(map[string]string, len(p.owners))
+	for name, owners := range p.owners {
+		if isPlatform(name) {
+			continue
+		}
+		counts := p.pkgs[path.Dir(name)]
+		best := owners[0]
+		for _, i := range owners[1:] {
+			if counts[i] > counts[best] {
+				best = i
+			}
+		}
+		out[name] = p.jars[best].Name
+	}
+	return out
+}
+
+func IsPlatform(name string) bool {
+	return isPlatform(name) || strings.HasPrefix(name, jvmdgPrefix)
+}
+
+func IsJvmdg(name string) bool {
+	return strings.HasPrefix(name, jvmdgPrefix)
+}
+
+func Needs(j Jar) []string {
+	return uniqueSorted(required(j))
+}
+
+func Provides(j Jar) []string {
+	var out []string
+	for _, id := range append(slices.Clone(j.ModIDs), j.Index.ModIDs...) {
+		out = append(out, strings.ToLower(id))
+	}
+	return uniqueSorted(out)
+}
+
+func Declares(j Jar) []string {
+	var out []string
+	for _, id := range j.Index.Mods {
+		out = append(out, strings.ToLower(id))
+	}
+	return uniqueSorted(out)
+}
+
+func JarUses(jars []Jar, classes map[string]string) map[string][]string {
+	out := map[string][]string{}
+	for _, j := range jars {
+		seen := map[string]bool{}
+		note := func(class string) {
+			if jar := classes[class]; jar != "" && jar != j.Name && !seen[jar] {
+				seen[jar] = true
+				out[j.Name] = append(out[j.Name], jar)
+			}
+		}
+		for _, r := range j.Index.Refs {
+			note(r.Owner)
+		}
+		for _, name := range j.Index.Uses {
+			note(name)
+		}
 	}
 	return out
 }

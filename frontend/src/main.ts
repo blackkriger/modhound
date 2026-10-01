@@ -1,12 +1,12 @@
 import './modhound.css';
 import './app.css';
 
-import {ApplyAppUpdate, Changelog, Check, Compat, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, ChooseVersion, DefaultPack, FindMissing, InstallMissing, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update, VersionNotes, Versions} from '../wailsjs/go/main/App';
-import {compat, main, resolve} from '../wailsjs/go/models';
+import {ApplyAppUpdate, Changelog, Check, Compat, Crash, DismissCrash, OpenCrash, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, ChooseVersion, DefaultPack, FindMissing, InstallMissing, Orphans, Remove, SetSide, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update, VersionNotes, Versions} from '../wailsjs/go/main/App';
+import {backup, compat, main, resolve} from '../wailsjs/go/models';
 import {ClipboardSetText, EventsOn, Quit, WindowMinimise} from '../wailsjs/runtime/runtime';
 
 type Mode = 'empty' | 'ready' | 'checking' | 'installing' | 'report';
-type Kind = 'up' | 'upd' | 'need' | 'nf' | 'sk' | 'cur';
+type Kind = 'up' | 'upd' | 'need' | 'nf' | 'rm' | 'sk' | 'cur';
 type InstallState = { state: string; percent: number; error: string };
 type Row = { m: resolve.Mod; as?: string };
 
@@ -28,6 +28,7 @@ const GLYPH: Record<string, [string, string]> = {
     downloading: ['↓', 'm3-g m3-g--now'],
     queued: ['·', 'm3-g'],
     failed: ['✕', 'm3-g m3-g--bad'],
+    removed: ['−', 'm3-g'],
 };
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -49,12 +50,16 @@ const state = {
     mods: new Map<string, resolve.Mod>(),
     settings: null as main.Settings | null,
     q: '',
-    kindsOn: {up: true, upd: true, need: true, nf: true, sk: true, cur: false} as Record<Kind, boolean>,
+    kindsOn: {up: true, upd: true, need: true, nf: true, rm: true, sk: true, cur: false} as Record<Kind, boolean>,
     unchecked: new Set<string>(),
     undoPicked: new Set<string>(),
     problems: [] as compat.Problem[],
     offers: new Map<string, resolve.Offer | null | undefined>(),
     adding: [] as string[],
+    crash: null as main.Crash | null,
+    orphans: new Map<string, main.Dependencies | null>(),
+    orphanPicked: new Set<string>(),
+    removing: false,
     versions: new Map<string, resolve.Choice[] | string>(),
     versionsOpen: '',
     versionsAll: false,
@@ -216,7 +221,7 @@ function isNeed(m: resolve.Mod): boolean {
     return m.status === 'manual' || m.status === 'error';
 }
 
-function kindOf(m: resolve.Mod): Kind {
+function kindOf(m: resolve.Mod): Exclude<Kind, 'rm'> {
     if (m.skipped) return 'sk';
     if (m.status === 'update') return 'up';
     if (isNeed(m)) return 'need';
@@ -269,6 +274,36 @@ function hasSevere(m: resolve.Mod): boolean {
     return own.some(p => p.severe) || caused.some(p => p.severe);
 }
 
+function modByFile(file: string): resolve.Mod | undefined {
+    for (const m of state.mods.values()) {
+        if (installedFile(m) === file) return m;
+    }
+    return undefined;
+}
+
+function crashHTML(): string {
+    const c = state.crash;
+    if (!c) return '';
+    const who = c.culprit ? modName(c.culprit) : '';
+    let text = c.error + (c.missing ? `: ${c.missing}` : '');
+    if (c.cause) text = `${modName(c.cause)} has no ${c.missing}`;
+    else if (c.jvmdg) text = `needs ${c.missing} from JvmDowngrader`;
+    else if (c.error === 'NoClassDefFoundError' || c.error === 'ClassNotFoundException') text = `${c.missing} is not in the modpack`;
+    const undo = [c.cause, c.culprit].map(f => f ? modByFile(f) : undefined).find(m => m && undoItem(m.key, installedFile(m)));
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2})/.exec(c.time);
+    const when = m ? ` ${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}, ${m[4]}` : '';
+    return `<div class="m3-last m3-crash">
+        <span class="m3-eyebrow">Crashed${esc(when)}</span>
+        <p class="m3-reason m3-bad">${esc(who ? `${who}: ${text}` : text)}</p>
+        ${c.rootMissing && c.rootMissing !== c.missing ? `<p class="m3-reason m3-bad">${esc(`Caused by: ${c.rootMissing} ${c.rootJvmdg ? 'is missing from JvmDowngrader' : c.rootFound ? 'could not be loaded' : 'is not in the modpack'}`)}</p>` : ''}
+        <div class="m3-links">
+            ${undo ? `<a href="#" data-crash-undo="${esc(undo.id)}">Undo ${esc(undo.name)}</a>` : ''}
+            <a href="#" id="crash-open">Open report</a>
+            <a href="#" id="crash-dismiss">Dismiss</a>
+        </div>
+    </div>`;
+}
+
 function modName(file: string): string {
     for (const m of state.mods.values()) {
         if (installedFile(m) === file) return m.name;
@@ -278,10 +313,11 @@ function modName(file: string): string {
 
 function problemNote(m: resolve.Mod): { text: string; severe: boolean } {
     const {own, caused} = problemsOf(m);
-    const first = own.find(p => p.severe) ?? own[0];
+    const first = own.find(p => p.kind === 'duplicate') ?? own.find(p => p.severe) ?? own[0];
     if (first?.kind === 'api') return {text: first.severe ? `incompatible with ${modName(first.cause)}` : `may not work with ${modName(first.cause)}`, severe: first.severe};
     if (first?.kind === 'jvmdg') return {text: 'needs JvmDowngrader classes', severe: true};
     if (first?.kind === 'missing') return {text: `requires ${first.cause}`, severe: true};
+    if (first?.kind === 'duplicate') return {text: `duplicate of ${modName(first.cause)}`, severe: true};
     const severe = caused.filter(p => p.severe).length;
     if (severe) return {text: `breaks ${severe} ${plural(severe, 'mod', 'mods')}`, severe: true};
     if (caused.length) return {text: `may break ${caused.length} ${plural(caused.length, 'mod', 'mods')}`, severe: false};
@@ -293,13 +329,20 @@ function listed(details: string[]): string {
     return details.length > 6 ? `${shown} and ${details.length - 6} more` : shown;
 }
 
+function isDuplicate(m: resolve.Mod): boolean {
+    return problemsOf(m).own.some(p => p.kind === 'duplicate');
+}
+
 function problemsHTML(m: resolve.Mod): string {
-    const {own, caused} = problemsOf(m);
+    const dup = isDuplicate(m);
+    const own = problemsOf(m).own.filter(p => !dup || p.kind === 'duplicate');
+    const caused = dup ? [] : problemsOf(m).caused;
     if (!own.length && !caused.length) return '';
     const lines: [string, boolean, string][] = [
         ...own.map((p): [string, boolean, string] => {
             if (p.kind === 'api') return [`Uses ${listed(p.details)}, which ${modName(p.cause)} does not have.`, p.severe, ''];
             if (p.kind === 'jvmdg') return [p.cause ? `Needs ${listed(p.details)}, which ${p.cause} does not have.` : 'Needs the JvmDowngrader runtime, which no mod in the modpack provides.', true, ''];
+            if (p.kind === 'duplicate') return [`The same mod (${p.details[0]}) as ${modName(p.cause)}. Forge will not start with both.`, true, ''];
             return [`Requires ${p.cause}, which is not in the modpack.`, true, offerHTML(p.cause)];
         }),
         ...caused.map((p): [string, boolean, string] => [`${modName(p.jar)} uses ${listed(p.details)}, which this version does not have.`, p.severe, '']),
@@ -309,6 +352,13 @@ function problemsHTML(m: resolve.Mod): string {
 }
 
 function offerHTML(modId: string): string {
+    const removed = removedProvider(modId);
+    if (removed) {
+        const id = `removed|${removed.key}|${removed.oldFile}`;
+        return state.undoActive.includes(id)
+            ? `<a href="#" class="m3-file is-busy">Restoring ${esc(removed.name)}…</a>`
+            : `<a href="#" class="m3-file${busyOps() ? ' is-off' : ''}" data-restore="${esc(`removed|${removed.key}|${removed.oldFile}`)}" data-restore-id="${esc(id)}">Restore ${esc(removed.name)} ${esc(removed.from)}</a>`;
+    }
     if (!state.offers.has(modId)) findOffer(modId);
     const offer = state.offers.get(modId);
     if (!offer?.target) return '';
@@ -353,6 +403,19 @@ async function installMissing(modId: string) {
 
 let compatSeq = 0;
 
+async function refreshCrash() {
+    const seq = compatSeq;
+    const crash = await Crash().catch(() => null);
+    if (seq !== compatSeq || state.mode !== 'ready') return;
+    if (JSON.stringify(crash) === JSON.stringify(state.crash)) return;
+    state.crash = crash;
+    renderInspector();
+}
+
+window.addEventListener('focus', () => {
+    if (state.mode === 'ready' && !busyOps()) refreshCrash();
+});
+
 async function refreshCompat() {
     const seq = ++compatSeq;
     let problems: compat.Problem[] = [];
@@ -361,8 +424,11 @@ async function refreshCompat() {
     } catch {
         problems = [];
     }
+    const crash = await Crash().catch(() => null);
     if (seq !== compatSeq) return;
     state.problems = problems;
+    state.crash = crash;
+    state.orphans = new Map();
     if (state.mode === 'ready' || state.mode === 'report') render();
 }
 
@@ -427,6 +493,148 @@ function iconHTML(m: resolve.Mod, hero = false): string {
     const letter = esc(m.name.charAt(0).toUpperCase());
     if (m.icon && !state.badIcons.has(m.icon)) return `<span class="${cls}"><img src="${esc(m.icon)}" alt=""${state.pixelIcons.has(m.icon) ? ' class="is-pixel"' : ''} data-letter="${letter}"></span>`;
     return `<span class="${cls}">${letter}</span>`;
+}
+
+function removedItems(): backup.Item[] {
+    return (state.lastUpdate?.restorable ?? []).filter(it => it.removed && !it.key.startsWith('server:')).sort((a, b) => (b.time ?? '').localeCompare(a.time ?? ''));
+}
+
+function removedProvider(modId: string): backup.Item | undefined {
+    return removedItems().find(it => (it.modIds ?? []).some(id => id.toLowerCase() === modId));
+}
+
+function removedNeededBy(it: backup.Item): number {
+    const ids = new Set((it.modIds ?? []).map(id => id.toLowerCase()));
+    return new Set(state.problems.filter(p => p.kind === 'missing' && ids.has(p.cause)).map(p => p.jar)).size;
+}
+
+function removedRowHTML(it: backup.Item): string {
+    const id = `removed|${it.key}|${it.oldFile}`;
+    const restoring = state.undoActive.includes(id);
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2})/.exec(it.time ?? '');
+    const when = m ? `removed ${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}, ${m[4]}` : '';
+    const needed = removedNeededBy(it);
+    const note = restoring
+        ? '<span class="m3-note is-busy">restoring…</span>'
+        : needed ? `<span class="m3-note m3-note--bad">needed by ${needed} ${plural(needed, 'mod', 'mods')}</span>` : when ? `<span class="m3-note">${esc(when)}</span>` : '';
+    return `<div class="m3-row${restoring ? '' : ' has-acts'}" data-id="${esc(id)}" data-removed="${esc(`removed|${it.key}|${it.oldFile}`)}">
+        <span class="m3-check-slot"></span>
+        <button type="button" class="m3-row-main" aria-pressed="false">
+            <span class="${needed ? 'm3-g m3-g--bad' : GLYPH.removed[1]}" aria-hidden="true">${GLYPH.removed[0]}</span>
+            <span class="m3-icon">${esc(it.name.charAt(0).toUpperCase())}</span>
+            <span class="m3-name">${esc(it.name)}</span>
+            ${note}
+            <span class="m3-ver">${esc(it.from)}</span>
+        </button>
+        ${restoring ? '' : '<span class="m3-acts"><button type="button" class="m3-act" data-act="undo-removed">Undo</button></span>'}
+    </div>`;
+}
+
+function sideHTML(m: resolve.Mod): string {
+    if (!state.settings?.server) return '';
+    const options: [string, string][] = [['client', 'Client'], ['server', 'Server'], ['both', 'Both']];
+    return `<fieldset class="m3-field">
+        <legend class="m3-label">Side</legend>
+        <div class="m3-links">
+            ${options.map(([v, label]) => `<label class="m3-radio"><input type="radio" name="side" value="${v}" ${m.side === v ? 'checked' : ''}>${label}</label>`).join('')}
+            ${m.sideSet ? '<a href="#" id="side-reset">Reset</a>' : ''}
+        </div>
+    </fieldset>`;
+}
+
+function pickedOrphans(m: resolve.Mod): string[] {
+    const orphans = state.orphans.get(m.id)?.orphans ?? [];
+    return orphans.filter(o => state.orphanPicked.has(o.id)).map(o => o.id);
+}
+
+function removeHTML(m: resolve.Mod): string {
+    if (state.mode !== 'ready') return '';
+    if (isDuplicate(m)) {
+        return `<div class="m3-notes">
+        <span class="m3-eyebrow">Remove from modpack</span>
+        <div class="m3-links">
+            <a href="#" id="remove-confirm"${state.removing ? ' class="is-busy"' : busyOps() ? ' class="is-off"' : ''}>${state.removing ? 'Removing…' : `Remove ${esc(m.fileName)}`}</a>
+        </div>
+    </div>`;
+    }
+    if (!state.orphans.has(m.id)) loadOrphans(m.id);
+    const deps = state.orphans.get(m.id);
+    const orphans = deps?.orphans;
+    const kept = deps?.kept ?? [];
+    const picked = pickedOrphans(m).length;
+    const list = orphans?.length
+            ? `<p class="m3-reason is-muted">${esc(m.name)} requires these mods, but nothing else in the modpack does. You can remove them as well:</p>${orphans.map(o => `<label class="m3-radio"><input type="checkbox" data-orphan="${esc(o.id)}" ${state.orphanPicked.has(o.id) ? 'checked' : ''}>${esc(o.name)}</label>${o.by?.length && (o.by.length > 1 || o.by[0] !== m.name) ? `<p class="m3-reason is-muted">Required by ${esc(o.by.join(', '))}</p>` : ''}`).join('')}`
+            : '';
+    const keptText = kept.length ? `<p class="m3-reason is-muted">${orphans?.length ? 'Also requires' : 'Requires'} ${esc(kept.map(k => `${k.name} (${k.users} more ${plural(k.users, 'mod needs', 'mods need')} it)`).join(', '))}</p>` : '';
+    const dependents = deps?.dependents ?? [];
+    const dependentsText = dependents.length ? `<p class="m3-reason m3-bad">${esc(dependents.join(', '))} ${plural(dependents.length, 'requires', 'require')} ${esc(m.name)} and will not start without it</p>` : '';
+    const users = deps?.users ?? [];
+    const usersText = users.length ? `<p class="m3-reason is-muted">Also used by ${esc(users.join(', '))}</p>` : '';
+    return `<div class="m3-notes">
+        <span class="m3-eyebrow">Remove from modpack</span>
+        ${dependentsText}
+        ${usersText}
+        ${list}
+        ${keptText}
+        <div class="m3-links">
+            <a href="#" id="remove-confirm"${state.removing ? ' class="is-busy"' : busyOps() ? ' class="is-off"' : ''}>${state.removing ? 'Removing…' : `Remove ${esc(m.name)}${picked ? ` and ${picked} more` : ''}`}</a>
+        </div>
+    </div>`;
+}
+
+async function setSide(m: resolve.Mod, side: string) {
+    try {
+        const effective = await SetSide(m.key, side);
+        for (const x of state.mods.values()) {
+            if (x.key === m.key) {
+                x.side = effective;
+                x.sideSet = side !== '';
+            }
+        }
+        refreshServer();
+    } catch (e) {
+        state.error = String(e);
+    }
+    render();
+}
+
+async function loadOrphans(id: string) {
+    if (state.orphans.has(id)) return;
+    const orphans = state.orphans;
+    orphans.set(id, null);
+    let deps: main.Dependencies | null = null;
+    try {
+        deps = await Orphans(id);
+    } catch {
+        deps = null;
+    }
+    if (orphans !== state.orphans) return;
+    orphans.set(id, deps);
+    if (state.selId === id && (deps?.orphans?.length || deps?.kept?.length || deps?.dependents?.length || deps?.users?.length)) renderInspector();
+}
+
+async function runRemove(m: resolve.Mod) {
+    if (state.removing || busyOps()) return;
+    state.removing = true;
+    renderInspector();
+    try {
+        const r = await Remove([m.id, ...(isDuplicate(m) ? [] : pickedOrphans(m))]);
+        for (const id of r.removed ?? []) state.mods.delete(id);
+        modsChanged();
+        const n = r.removed?.length ?? 0;
+        const onServer = (r.server ?? []).filter(x => x.ok).length;
+        state.notice = `removed ${n} ${plural(n, 'mod', 'mods')}${onServer ? `, ${onServer} on the server` : ''}${r.failed?.length ? `, failed: ${r.failed.join(', ')}` : ''}`;
+        if (r.removed?.includes(m.id)) state.selId = null;
+    } catch (e) {
+        state.error = String(e);
+    }
+    state.removing = false;
+    state.orphans = new Map();
+    state.orphanPicked = new Set();
+    state.lastUpdate = await LastUpdate().catch(() => null);
+    render();
+    refreshServer();
+    refreshCompat();
 }
 
 function rowHTML({m, as}: Row): string {
@@ -496,7 +704,7 @@ function rowHTML({m, as}: Row): string {
 function renderChanges() {
     const list = $('list');
     const mods = allMods();
-    const count = (k: Kind) => mods.filter(m => kindOf(m) === k).length;
+    const count = (k: Kind) => k === 'rm' ? removedItems().length : mods.filter(m => kindOf(m) === k).length;
     let sections: [string, Row[]][] = [];
     let tail = '';
 
@@ -544,17 +752,24 @@ function renderChanges() {
             ['up', '↑', 'm3-g--up', 'updates'],
             ['upd', '✓', 'm3-g--ok', 'updated'],
             ['nf', '?', '', 'not found'],
+            ['rm', '−', '', 'removed'],
             ['sk', '–', '', 'skipped'],
             ['cur', '=', '', 'current'],
         ];
-        sections = defs.filter(([k]) => state.kindsOn[k] || q).map(([k, , , l]) => [l, mods.filter(m => kindOf(m) === k).map(m => ({m}))]);
-        const labels: Record<Kind, [string, string]> = {up: ['update', 'updates'], upd: ['updated', 'updated'], need: ['need you', 'need you'], nf: ['not found', 'not found'], sk: ['skipped', 'skipped'], cur: ['current', 'current']};
+        sections = defs.filter(([k]) => state.kindsOn[k] || q).map(([k, , , l]) => [l, k === 'rm' ? [] : mods.filter(m => kindOf(m) === k).map(m => ({m}))]);
+        const labels: Record<Kind, [string, string]> = {up: ['update', 'updates'], upd: ['updated', 'updated'], need: ['need you', 'need you'], nf: ['not found', 'not found'], rm: ['removed', 'removed'], sk: ['skipped', 'skipped'], cur: ['current', 'current']};
         const hidden = defs.map(([k]) => k).filter(k => !state.kindsOn[k] && count(k) > 0).map(k => `${count(k)} ${plural(count(k), ...labels[k])}`);
         tail = !q && hidden.length ? `${hidden.join(', ')} hidden` : '';
     }
 
     let html = '';
     for (const [label, rows] of sections) {
+        if (label === 'removed') {
+            const q = state.q.trim().toLowerCase();
+            const removed = removedItems().filter(it => !q || it.name.toLowerCase().includes(q));
+            if (removed.length) html += `<div class="m3-sep">removed<span class="m3-sep-note">deleted when modhound closed</span></div>${removed.map(removedRowHTML).join('')}`;
+            continue;
+        }
         const visible = sortRows(label, rows.filter(r => matchesQuery(r.m)));
         if (!visible.length) continue;
         const idle = state.mode === 'ready' || state.mode === 'report';
@@ -775,7 +990,7 @@ function techHTML(d: resolve.ModDebug): string {
 
 function inspectorHTML(): string {
     const mods = allMods();
-    const count = (k: Kind) => mods.filter(m => kindOf(m) === k).length;
+    const count = (k: Kind) => k === 'rm' ? removedItems().length : mods.filter(m => kindOf(m) === k).length;
     const sel = state.selId ? state.mods.get(state.selId) : undefined;
     const idle = state.mode === 'ready' || state.mode === 'report';
 
@@ -846,8 +1061,10 @@ function inspectorHTML(): string {
             <p class="m3-reason">${esc(reasonText(sel))}</p>
             ${links ? `<div class="m3-links">${links}</div>` : ''}
             ${state.versionsOpen === sel.id ? versionsHTML(sel) : ''}
+            ${sideHTML(sel)}
             ${problemsHTML(sel)}
             ${showTo && state.mode === 'ready' ? notesHTML(sel.id) : ''}
+            ${removeHTML(sel)}
             ${sel.debug ? techHTML(sel.debug) : ''}
         </div>
         <div class="m3-insp-foot">
@@ -926,12 +1143,14 @@ function inspectorHTML(): string {
     const on = (k: Kind) => state.kindsOn[k] || !!state.q.trim();
     const line = (k: Kind, g: string, gc: string, label: string) => `<li><button type="button" class="m3-line" data-kind="${k}" aria-pressed="${on(k)}"><span class="g ${gc}">${g}</span><span class="${gc === 'm3-bad' ? 'm3-bad' : k === 'cur' ? 'm' : ''}"><span class="m3-num">${count(k)}</span> ${label}</span></button></li>`;
     return `<div class="m3-insp">
+        ${crashHTML()}
         <button type="button" class="m3-line m3-line--big" data-kind="up" aria-pressed="${on('up')}"><span class="m3-big m3-num" data-count="ready">${up}</span><span class="m3-big-l">${plural(up, 'update ready', 'updates ready')}</span></button>
         <div class="m3-split">
         <ul class="m3-lines">
             ${line('need', '!', 'm3-bad', 'need you')}
             ${count('upd') ? line('upd', '✓', '', 'updated') : ''}
             ${line('nf', '?', 'm', 'not found')}
+            ${count('rm') ? line('rm', '−', removedItems().some(it => removedNeededBy(it) > 0) ? 'm3-bad' : 'm', 'removed') : ''}
             ${line('sk', '–', 'm', 'skipped')}
             ${line('cur', '=', 'm', 'current')}
         </ul>
@@ -1252,7 +1471,7 @@ function isRemote(s: string): boolean {
 }
 
 function busyOps(): boolean {
-    return state.installing > 0 || state.undoActive.length > 0 || state.adding.length > 0;
+    return state.installing > 0 || state.undoActive.length > 0 || state.adding.length > 0 || state.removing;
 }
 
 function installDone(): number {
@@ -1260,7 +1479,7 @@ function installDone(): number {
 }
 
 async function runUndo(ids: string[], mods: string[]) {
-    if (state.mode === 'checking' || state.mode === 'empty' || mods.some(id => state.undoActive.includes(id))) return;
+    if (state.removing || state.mode === 'checking' || state.mode === 'empty' || mods.some(id => state.undoActive.includes(id))) return;
     state.undoActive = [...state.undoActive, ...mods];
     render();
     try {
@@ -1333,7 +1552,7 @@ async function runSync() {
 }
 
 async function runUpdate(ids: string[]) {
-    if (state.mode !== 'ready' && state.mode !== 'report' && state.mode !== 'installing') return;
+    if (state.removing || state.mode !== 'ready' && state.mode !== 'report' && state.mode !== 'installing') return;
     ids = ids.filter(id => {
         const m = state.mods.get(id);
         return m && !m.skipped && m.status === 'update' && !state.install.has(id) && !state.undoActive.includes(id);
@@ -1568,6 +1787,11 @@ $('list').addEventListener('click', e => {
         renderFoot();
         return;
     }
+    const removedRow = el.closest<HTMLElement>('[data-removed]');
+    if (removedRow && el.closest('[data-act="undo-removed"]')) {
+        runUndo([removedRow.dataset.removed!], [removedRow.dataset.id!]);
+        return;
+    }
     const row = el.closest<HTMLElement>('.m3-row');
     const m = row ? state.mods.get(row.dataset.id!) : undefined;
     if (!m) return;
@@ -1647,6 +1871,49 @@ $('insp').addEventListener('click', e => {
     if (el.closest('#sel-versions') && chosenMod) {
         e.preventDefault();
         toggleVersions(chosenMod);
+        return;
+    }
+    const selMod = state.selId ? state.mods.get(state.selId) : undefined;
+    if (el.closest('#remove-confirm') && selMod) {
+        e.preventDefault();
+        runRemove(selMod);
+        return;
+    }
+    const orphan = el instanceof HTMLInputElement ? el.dataset.orphan : undefined;
+    if (orphan) {
+        (el as HTMLInputElement).checked ? state.orphanPicked.add(orphan) : state.orphanPicked.delete(orphan);
+        renderInspector();
+        return;
+    }
+    const side = el instanceof HTMLInputElement && el.name === 'side' ? el.value : el.closest('#side-reset') ? '' : null;
+    if (side !== null && selMod) {
+        if (!side) e.preventDefault();
+        setSide(selMod, side);
+        return;
+    }
+    const crashUndo = el.closest<HTMLElement>('[data-crash-undo]')?.dataset.crashUndo;
+    const crashMod = crashUndo ? state.mods.get(crashUndo) : undefined;
+    if (crashMod) {
+        e.preventDefault();
+        runUndo([`${crashMod.key}|${installedFile(crashMod)}`], [crashMod.id]);
+        return;
+    }
+    if (el.closest('#crash-open') && state.crash) {
+        e.preventDefault();
+        OpenCrash(state.crash.file);
+        return;
+    }
+    if (el.closest('#crash-dismiss') && state.crash) {
+        e.preventDefault();
+        DismissCrash(state.crash.file).catch(() => {});
+        state.crash = null;
+        renderInspector();
+        return;
+    }
+    const restore = el.closest<HTMLElement>('[data-restore]');
+    if (restore) {
+        e.preventDefault();
+        runUndo([restore.dataset.restore!], [restore.dataset.restoreId!]);
         return;
     }
     const missing = el.closest<HTMLElement>('[data-install]')?.dataset.install;
