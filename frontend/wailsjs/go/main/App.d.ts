@@ -28,6 +28,8 @@ export function DefaultPack():Promise<string>;
 
 export function DismissCrash(arg1:string):Promise<void>;
 
+export function DismissLog(arg1:string):Promise<void>;
+
 export function FindMissing(arg1:string):Promise<resolve.Offer>;
 
 export function InstallMissing(arg1:string):Promise<resolve.Mod>;
@@ -38,7 +40,11 @@ export function LastUpdate():Promise<main.LastUpdate>;
 
 export function LogFrontend(arg1:string):Promise<void>;
 
+export function LogProblems():Promise<main.LogIssues>;
+
 export function OpenCrash(arg1:string):Promise<void>;
+
+export function OpenLog():Promise<void>;
 
 export function OpenLogFolder():Promise<void>;
 

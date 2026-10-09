@@ -116,6 +116,9 @@ func (c *Cause) Missing() (Member, bool) {
 		}
 		return Member{Name: msg}, msg != ""
 	case "NoClassDefFoundError", "ClassNotFoundException":
+		if i := strings.IndexByte(msg, ' '); i >= 0 {
+			msg = msg[:i]
+		}
 		if msg == "" {
 			return Member{}, false
 		}

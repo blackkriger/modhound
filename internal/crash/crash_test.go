@@ -43,6 +43,9 @@ func TestMissingFieldAndClass(t *testing.T) {
 	if m, _ := (&Cause{Error: "java.lang.NoClassDefFoundError", Message: "xyz/wagyourtail/jvmdg/j9/Stub"}).Missing(); m.Owner != "xyz/wagyourtail/jvmdg/j9/Stub" {
 		t.Fatalf("class %+v", m)
 	}
+	if m, _ := (&Cause{Error: "java.lang.NoClassDefFoundError", Message: "a/b/Handler (wrong name: Handler2)"}).Missing(); m.Owner != "a/b/Handler" {
+		t.Fatalf("wrong name %+v", m)
+	}
 }
 
 func TestMissingModernMessages(t *testing.T) {

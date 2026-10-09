@@ -34,6 +34,7 @@ type StatusError struct {
 	URL    string
 	Status int
 	Body   string
+	Header http.Header
 }
 
 func Short(err error) string {
@@ -99,7 +100,7 @@ func Do(ctx context.Context, method, url string, headers map[string]string, body
 			continue
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			lastErr = &StatusError{URL: url, Status: resp.StatusCode, Body: truncate(data)}
+			lastErr = &StatusError{URL: url, Status: resp.StatusCode, Body: truncate(data), Header: resp.Header}
 			if wait, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && wait > 0 && wait <= 30 {
 				select {
 				case <-ctx.Done():
@@ -110,7 +111,7 @@ func Do(ctx context.Context, method, url string, headers map[string]string, body
 			continue
 		}
 		if resp.StatusCode >= 300 {
-			return &StatusError{URL: url, Status: resp.StatusCode, Body: truncate(data)}
+			return &StatusError{URL: url, Status: resp.StatusCode, Body: truncate(data), Header: resp.Header}
 		}
 		if out == nil {
 			return nil

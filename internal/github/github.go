@@ -2,7 +2,13 @@ package github
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,11 +30,60 @@ type Release struct {
 	Assets     []Asset   `json:"assets"`
 }
 
-func Releases(ctx context.Context, repo string) ([]Release, error) {
-	var out []Release
-	err := httpx.Do(ctx, http.MethodGet, "https://api.github.com/repos/"+repo+"/releases?per_page=100", map[string]string{"Accept": "application/vnd.github+json"}, nil, &out)
-	return out, err
+type Result struct {
+	Releases []Release
+	Stale    error
 }
+
+func Releases(ctx context.Context, repo, cacheDir string) (Result, error) {
+	url := "https://api.github.com/repos/" + repo + "/releases?per_page=100"
+	headers := map[string]string{"Accept": "application/vnd.github+json"}
+	if cacheDir == "" {
+		var out []Release
+		err := httpx.Do(ctx, http.MethodGet, url, headers, nil, &out)
+		return Result{Releases: out}, explain(err)
+	}
+	cachePath := filepath.Join(cacheDir, "github", strings.ReplaceAll(repo, "/", "_")+".json")
+	res, err := httpx.CachedGet(ctx, url, cachePath, time.Hour, headers, json.Valid)
+	if err != nil {
+		return Result{}, explain(err)
+	}
+	var out []Release
+	if err := json.Unmarshal(res.Data, &out); err != nil {
+		os.Remove(cachePath)
+		os.Remove(cachePath + ".etag")
+		return Result{}, err
+	}
+	return Result{Releases: out, Stale: explain(res.Stale)}, nil
+}
+
+func explain(err error) error {
+	var se *httpx.StatusError
+	if !errors.As(err, &se) {
+		return err
+	}
+	if (se.Status == http.StatusForbidden || se.Status == http.StatusTooManyRequests) && se.Header.Get("X-RateLimit-Remaining") == "0" {
+		if reset, perr := strconv.ParseInt(se.Header.Get("X-RateLimit-Reset"), 10, 64); perr == nil {
+			return &apiError{fmt.Sprintf("GitHub HTTP %d: the limit of %s requests per hour is used up, it resets at %s", se.Status, se.Header.Get("X-RateLimit-Limit"), time.Unix(reset, 0).Format("15:04")), err}
+		}
+	}
+	var body struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(se.Body), &body) == nil && body.Message != "" {
+		return &apiError{fmt.Sprintf("GitHub HTTP %d: %s", se.Status, body.Message), err}
+	}
+	return &apiError{fmt.Sprintf("GitHub HTTP %d", se.Status), err}
+}
+
+type apiError struct {
+	msg string
+	err error
+}
+
+func (e *apiError) Error() string { return e.msg }
+
+func (e *apiError) Unwrap() error { return e.err }
 
 func (r *Release) Jars(stem func(string) string, want string) []Asset {
 	var out []Asset

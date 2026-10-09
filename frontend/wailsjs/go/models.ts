@@ -226,6 +226,7 @@ export namespace main {
 	    culprit: string;
 	    cause: string;
 	    jvmdg: boolean;
+	    found: boolean;
 	    rootError: string;
 	    rootMissing: string;
 	    rootJvmdg: boolean;
@@ -244,6 +245,7 @@ export namespace main {
 	        this.culprit = source["culprit"];
 	        this.cause = source["cause"];
 	        this.jvmdg = source["jvmdg"];
+	        this.found = source["found"];
 	        this.rootError = source["rootError"];
 	        this.rootMissing = source["rootMissing"];
 	        this.rootJvmdg = source["rootJvmdg"];
@@ -327,6 +329,72 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.restorable = this.convertValues(source["restorable"], backup.Item);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class LogIssue {
+	    problem: Crash;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new LogIssue(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.problem = this.convertValues(source["problem"], Crash);
+	        this.count = source["count"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class LogIssues {
+	    key: string;
+	    time: string;
+	    issues: LogIssue[];
+	
+	    static createFrom(source: any = {}) {
+	        return new LogIssues(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.time = source["time"];
+	        this.issues = this.convertValues(source["issues"], LogIssue);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

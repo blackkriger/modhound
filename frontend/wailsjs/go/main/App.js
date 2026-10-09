@@ -50,6 +50,10 @@ export function DismissCrash(arg1) {
   return window['go']['main']['App']['DismissCrash'](arg1);
 }
 
+export function DismissLog(arg1) {
+  return window['go']['main']['App']['DismissLog'](arg1);
+}
+
 export function FindMissing(arg1) {
   return window['go']['main']['App']['FindMissing'](arg1);
 }
@@ -70,8 +74,16 @@ export function LogFrontend(arg1) {
   return window['go']['main']['App']['LogFrontend'](arg1);
 }
 
+export function LogProblems() {
+  return window['go']['main']['App']['LogProblems']();
+}
+
 export function OpenCrash(arg1) {
   return window['go']['main']['App']['OpenCrash'](arg1);
+}
+
+export function OpenLog() {
+  return window['go']['main']['App']['OpenLog']();
 }
 
 export function OpenLogFolder() {

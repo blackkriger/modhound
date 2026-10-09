@@ -35,6 +35,7 @@ type Jar struct {
 
 type Env struct {
 	JvmdgClasses func(version string) (map[string]bool, error)
+	Platform     *Platform
 }
 
 const jvmdgArtifact = "xyz.wagyourtail.jvmdowngrader:jvmdowngrader-java-api"
@@ -139,12 +140,20 @@ func (p *pack) resolve(r ref) (outcome, int) {
 }
 
 func (p *pack) patched(i int, r ref) bool {
+	return p.fixedSet(i)[r.Owner+"."+r.Name]
+}
+
+func (p *pack) patchedClass(i int, name string) bool {
+	return p.fixedSet(i)[name]
+}
+
+func (p *pack) fixedSet(i int) map[string]bool {
 	set, ok := p.fixed[i]
 	if !ok {
 		set = p.fixedRefs(p.jars[i])
 		p.fixed[i] = set
 	}
-	return set[r.Owner+"."+r.Name]
+	return set
 }
 
 func (p *pack) fixedRefs(j Jar) map[string]bool {
@@ -201,7 +210,7 @@ func (p *pack) apiProblems(add func(Problem)) {
 			if _, ok := p.owners[name]; ok {
 				continue
 			}
-			if o := p.home(name); o >= 0 && o != i {
+			if o := p.home(name); o >= 0 && o != i && !p.patchedClass(i, name) {
 				byCause[o] = append(byCause[o], dotted(name))
 			}
 		}
@@ -334,6 +343,7 @@ func Check(jars []Jar, env Env) []Problem {
 	var out []Problem
 	add := func(pr Problem) { out = append(out, pr) }
 	p.apiProblems(add)
+	p.platformProblems(env, add)
 	p.jvmdgProblems(env, add)
 	p.missingProblems(add)
 	p.duplicateProblems(add)

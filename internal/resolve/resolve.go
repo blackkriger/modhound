@@ -842,16 +842,23 @@ func (r *resolver) resolveCurseForge(ctx context.Context, m *Mod) error {
 }
 
 func (r *resolver) resolveGitHub(ctx context.Context, m *Mod) error {
-	releases, err := github.Releases(ctx, m.gh)
+	res, err := github.Releases(ctx, m.gh, r.opts.CacheDir)
 	if err != nil {
 		return err
+	}
+	releases := res.Releases
+	if res.Stale != nil {
+		m.Reason = "Checked against the GitHub releases saved earlier (" + res.Stale.Error() + ")"
 	}
 	var best, installed *github.Release
 	var asset *github.Asset
 	for i := range releases {
 		rel := &releases[i]
+		if rel.Draft {
+			continue
+		}
 		jar := releaseJar(rel, m.FileName, r.pack.MCVersion)
-		if rel.Draft || jar == nil {
+		if jar == nil {
 			continue
 		}
 		if strings.EqualFold(jar.Name, m.FileName) {
@@ -862,7 +869,15 @@ func (r *resolver) resolveGitHub(ctx context.Context, m *Mod) error {
 		}
 	}
 	logx.Printf("%s: github %s, %d releases, latest %v", m.FileName, m.gh, len(releases), best != nil)
-	if best == nil || strings.EqualFold(asset.Name, m.FileName) || installed != nil && !best.Published.After(installed.Published) ||
+	if best == nil {
+		m.Status = StatusCurrent
+		if rel, jar := renamedGitHubJar(releases, m.FileName, r.pack.MCVersion); jar != nil {
+			m.Status, m.Reason = StatusManual, "A newer file has a different name: "+jar.Name
+			m.Target = &Target{Version: rel.Tag, FileName: jar.Name, Date: rel.Published.Format(time.DateOnly), PageURL: rel.HTMLURL}
+		}
+		return nil
+	}
+	if strings.EqualFold(asset.Name, m.FileName) || installed != nil && !best.Published.After(installed.Published) ||
 		installed == nil && (sameVersion(asset.Name, m.FileName, r.pack.MCVersion) || OlderVersion(asset.Name, m.FileName, r.pack.MCVersion)) {
 		m.Status = StatusCurrent
 		return nil

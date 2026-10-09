@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,12 @@ type App struct {
 
 	jvmdgMu sync.Mutex
 	jvmdg   map[string]*compat.JvmdgSource
+
+	logMu       sync.Mutex
+	logKey      string
+	logReport   *crash.LogReport
+	crashKey    string
+	crashReport *crash.Report
 
 	offers map[string]*resolve.Offer
 
@@ -703,8 +710,12 @@ func compatInputs(pack *resolve.Pack) []compatInput {
 func (a *App) compatProblems(ctx context.Context, pack *resolve.Pack) []compat.Problem {
 	current := compatInputs(pack)
 	previous := a.previousVersions(pack, current)
+	lwjgl := compat.FindLWJGL(pack.Root, pack.MCVersion)
 	h := sha1.New()
 	fmt.Fprintln(h, pack.Root)
+	if lwjgl != nil {
+		fmt.Fprintln(h, lwjgl.Name)
+	}
 	for _, in := range append(slices.Clone(current), previous...) {
 		fmt.Fprintln(h, in.name, in.key)
 	}
@@ -730,6 +741,13 @@ func (a *App) compatProblems(ctx context.Context, pack *resolve.Pack) []compat.P
 	}
 	var failed atomic.Bool
 	env := a.compatEnv(ctx, pack.Root, &failed)
+	if lwjgl != nil {
+		if pl, err := compat.LoadPlatform(lwjgl, cacheDir); err == nil {
+			env.Platform = pl
+		} else {
+			logx.Printf("compat: %s not indexed: %v", lwjgl.Name, err)
+		}
+	}
 	problems := compat.Merge(compat.Check(list, env), compat.Replaced(list, old, env))
 	if problems == nil {
 		problems = []compat.Problem{}
@@ -758,6 +776,7 @@ type Crash struct {
 	Culprit string `json:"culprit"`
 	Cause   string `json:"cause"`
 	Jvmdg   bool   `json:"jvmdg"`
+	Found   bool   `json:"found"`
 
 	RootError   string `json:"rootError"`
 	RootMissing string `json:"rootMissing"`
@@ -772,28 +791,165 @@ func (a *App) Crash() (*Crash, error) {
 	if pack == nil {
 		return nil, errors.New("no pack loaded")
 	}
-	r, err := crash.Latest(pack.Root)
+	r, err := a.latestCrash(pack.Root)
 	if err != nil || r == nil || a.store.CrashSeen(pack.Root) == filepath.Base(r.Path) {
 		return nil, err
 	}
-	problems := a.compatProblems(a.ctx, pack)
+	out := a.newExplainer(pack).explain(r.Causes, r.Time)
+	if out == nil {
+		return nil, nil
+	}
+	out.File, out.Time = filepath.Base(r.Path), r.Time.Format(time.DateTime)
+	return out, nil
+}
+
+func (a *App) latestCrash(root string) (*crash.Report, error) {
+	paths, _ := filepath.Glob(filepath.Join(root, "crash-reports", "crash-*.txt"))
+	key := root
+	for _, p := range paths {
+		if st, err := os.Stat(p); err == nil {
+			key += "|" + p + ":" + strconv.FormatInt(st.ModTime().UnixNano(), 10)
+		}
+	}
+	a.logMu.Lock()
+	defer a.logMu.Unlock()
+	if key == a.crashKey {
+		return a.crashReport, nil
+	}
+	r, err := crash.Latest(root)
+	if err != nil {
+		return nil, err
+	}
+	a.crashKey, a.crashReport = key, r
+	if r != nil {
+		logx.Printf("crash report %s parsed, %d causes", filepath.Base(r.Path), len(r.Causes))
+	}
+	return r, nil
+}
+
+type LogIssues struct {
+	Key    string     `json:"key"`
+	Time   string     `json:"time"`
+	Issues []LogIssue `json:"issues"`
+}
+
+type LogIssue struct {
+	Problem Crash `json:"problem"`
+	Count   int   `json:"count"`
+}
+
+func (a *App) LogProblems() (*LogIssues, error) {
+	a.mu.Lock()
+	pack := a.pack
+	a.mu.Unlock()
+	if pack == nil {
+		return nil, errors.New("no pack loaded")
+	}
+	st, err := os.Stat(filepath.Join(pack.Root, "logs", "latest.log"))
+	if err != nil {
+		return nil, nil
+	}
+	fileKey := pack.Root + "|" + strconv.FormatInt(st.ModTime().UnixNano(), 10) + ":" + strconv.FormatInt(st.Size(), 10)
+	a.logMu.Lock()
+	r := a.logReport
+	if a.logKey != fileKey {
+		r, err = crash.LatestLog(pack.Root)
+		if err != nil || r == nil {
+			a.logMu.Unlock()
+			return nil, err
+		}
+		a.logKey, a.logReport = fileKey, r
+	}
+	a.logMu.Unlock()
+	var blocks [][]*crash.Cause
+	counts := map[string]int{}
+	for _, block := range r.Blocks {
+		sig := blockSignature(block)
+		if counts[sig] == 0 {
+			blocks = append(blocks, block)
+		}
+		counts[sig]++
+	}
+	e := a.newExplainer(pack)
+	out := &LogIssues{Time: r.Start.Format(time.DateTime)}
+	index := map[string]int{}
+	for _, block := range blocks {
+		c := e.explain(block, r.Start)
+		if c == nil || c.Culprit == "" {
+			continue
+		}
+		n := counts[blockSignature(block)]
+		id := c.Culprit + "|" + c.Error + "|" + c.Missing + "|" + c.Cause
+		if i, ok := index[id]; ok {
+			out.Issues[i].Count += n
+			continue
+		}
+		index[id] = len(out.Issues)
+		out.Issues = append(out.Issues, LogIssue{Problem: *c, Count: n})
+	}
+	if len(out.Issues) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(index))
+	for id := range index {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	sum := sha1.Sum([]byte(strings.Join(ids, "\n")))
+	out.Key = strconv.FormatInt(r.Start.Unix(), 10) + ":" + hex.EncodeToString(sum[:8])
+	if a.store.LogSeen(pack.Root) == out.Key {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func blockSignature(block []*crash.Cause) string {
+	var b strings.Builder
+	for _, c := range block {
+		b.WriteString(c.Error + ":" + c.Message + "|")
+		b.WriteString(strings.Join(c.Frames, ","))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+type explainer struct {
+	problems    []compat.Problem
+	classes     map[string]string
+	jvmdgFailed bool
+	modTimes    map[string]time.Time
+	changed     time.Time
+}
+
+func (a *App) newExplainer(pack *resolve.Pack) *explainer {
+	e := &explainer{problems: a.compatProblems(a.ctx, pack), modTimes: map[string]time.Time{}, changed: modsChangedAt(pack.ModsDir)}
 	a.compatMu.Lock()
-	classes, jvmdgFailed := a.compatClasses, a.compatFailed
+	e.classes, e.jvmdgFailed = a.compatClasses, a.compatFailed
 	a.compatMu.Unlock()
-	at := len(r.Causes) - 1
-	out := &Crash{File: filepath.Base(r.Path), Time: r.Time.Format(time.DateTime)}
-	for i := len(r.Causes) - 1; i >= 0 && out.Culprit == ""; i-- {
-		for _, f := range r.Causes[i].Frames {
+	for _, m := range pack.Snapshot() {
+		if st, err := os.Stat(m.Path); err == nil {
+			e.modTimes[m.FileName] = st.ModTime()
+		}
+	}
+	return e
+}
+
+func (e *explainer) explain(causes []*crash.Cause, when time.Time) *Crash {
+	problems, classes, jvmdgFailed := e.problems, e.classes, e.jvmdgFailed
+	at := len(causes) - 1
+	out := &Crash{}
+	for i := len(causes) - 1; i >= 0 && out.Culprit == ""; i-- {
+		for _, f := range causes[i].Frames {
 			if jar := classes[f]; jar != "" && !compat.IsPlatform(f) {
 				at, out.Culprit = i, jar
 				break
 			}
 		}
 	}
-	cause := r.Causes[at]
+	cause := causes[at]
 	out.Error = cause.Short()
 	primary, _ := cause.Missing()
-	for _, deeper := range r.Causes[at+1:] {
+	for _, deeper := range causes[at+1:] {
 		if m, ok := deeper.Missing(); ok && m.Name == "" && m.Owner != primary.Owner {
 			out.RootError = deeper.Short()
 			out.RootMissing = strings.ReplaceAll(m.Owner, "/", ".")
@@ -807,14 +963,10 @@ func (a *App) Crash() (*Crash, error) {
 			break
 		}
 	}
-	for _, m := range pack.Snapshot() {
-		if m.FileName == out.Culprit {
-			if st, err := os.Stat(m.Path); err == nil && st.ModTime().After(r.Time) {
-				return nil, nil
-			}
-		}
+	if t, ok := e.modTimes[out.Culprit]; ok && t.After(when) {
+		return nil
 	}
-	stale := modsChangedAt(pack.ModsDir).After(r.Time) && (out.RootMissing == "" || out.RootFound)
+	stale := e.changed.After(when) && (out.RootMissing == "" || out.RootFound)
 	own := func(kind compat.Kind, match func(d string) bool) *compat.Problem {
 		for _, p := range problems {
 			if p.Jar == out.Culprit && p.Kind == kind && (match == nil || slices.ContainsFunc(p.Details, match)) {
@@ -832,11 +984,12 @@ func (a *App) Crash() (*Crash, error) {
 		}
 	case missing.Name == "":
 		out.Missing = strings.ReplaceAll(missing.Owner, "/", ".")
+		out.Found = classes[missing.Owner] != ""
 		if out.Jvmdg = compat.IsJvmdg(missing.Owner); out.Jvmdg && stale && !jvmdgFailed && own(compat.KindJvmdg, nil) == nil {
-			return nil, nil
+			return nil
 		}
 		if !out.Jvmdg && stale && classes[missing.Owner] != "" {
-			return nil, nil
+			return nil
 		}
 	default:
 		simple := missing.Owner[strings.LastIndex(missing.Owner, "/")+1:]
@@ -854,13 +1007,12 @@ func (a *App) Crash() (*Crash, error) {
 		case p != nil:
 			out.Cause = p.Cause
 		case stale && missing.Owner != "" && !compat.IsPlatform(missing.Owner) && out.Culprit != "":
-			return nil, nil
+			return nil
 		default:
 			out.Cause = classes[missing.Owner]
 		}
 	}
-	logx.Printf("crash %s: %s %s in %s, cause %q", out.File, out.Error, out.Missing, out.Culprit, out.Cause)
-	return out, nil
+	return out
 }
 
 func (a *App) SetSide(key, side string) (string, error) {
@@ -1105,6 +1257,14 @@ func (a *App) DismissCrash(file string) error {
 	return a.store.SetCrashSeen(a.packRoot(), file)
 }
 
+func (a *App) DismissLog(key string) error {
+	return a.store.SetLogSeen(a.packRoot(), key)
+}
+
+func (a *App) OpenLog() {
+	opener.Open(filepath.Join(a.packRoot(), "logs", "latest.log"))
+}
+
 func (a *App) OpenCrash(file string) {
 	if file != filepath.Base(file) {
 		return
@@ -1269,7 +1429,8 @@ func (a *App) Versions(id string) ([]resolve.Choice, error) {
 	if pack == nil {
 		return nil, errors.New("no pack loaded")
 	}
-	return pack.Versions(a.ctx, id, a.store.CurseForgeKey())
+	cacheDir, _ := config.CacheDir()
+	return pack.Versions(a.ctx, id, a.store.CurseForgeKey(), cacheDir)
 }
 
 func (a *App) VersionNotes(id, choice string) (string, error) {
@@ -1284,6 +1445,10 @@ func (a *App) VersionNotes(id, choice string) (string, error) {
 
 func (a *App) ChooseVersion(id, choice string) (*resolve.Mod, error) {
 	a.mu.Lock()
+	if a.cancel != nil || a.ops > 0 {
+		a.mu.Unlock()
+		return nil, errors.New("wait until the current task finishes")
+	}
 	pack := a.pack
 	a.mu.Unlock()
 	if pack == nil {

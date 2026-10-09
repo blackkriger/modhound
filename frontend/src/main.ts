@@ -1,7 +1,7 @@
 import './modhound.css';
 import './app.css';
 
-import {ApplyAppUpdate, Changelog, Check, Compat, Crash, DismissCrash, OpenCrash, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, ChooseVersion, DefaultPack, FindMissing, InstallMissing, Orphans, Remove, SetSide, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update, VersionNotes, Versions} from '../wailsjs/go/main/App';
+import {ApplyAppUpdate, Changelog, Check, Compat, Crash, DismissCrash, DismissLog, LogProblems, OpenCrash, OpenLog, CheckAppUpdate, ChoosePack, ChooseKey, ChooseServer, ChooseVersion, DefaultPack, FindMissing, InstallMissing, Orphans, Remove, SetSide, KeepWindowSize, LastUpdate, LogFrontend, OpenLogFolder, OpenReport, OpenURL, SaveSettings, SelectPack, ServerBehind, SetConsoleOpen, SetSort, SetSkipped, Settings, Stop, SyncServer, Undo, Update, VersionNotes, Versions} from '../wailsjs/go/main/App';
 import {backup, compat, main, resolve} from '../wailsjs/go/models';
 import {ClipboardSetText, EventsOn, Quit, WindowMinimise} from '../wailsjs/runtime/runtime';
 
@@ -57,6 +57,7 @@ const state = {
     offers: new Map<string, resolve.Offer | null | undefined>(),
     adding: [] as string[],
     crash: null as main.Crash | null,
+    log: null as main.LogIssues | null,
     orphans: new Map<string, main.Dependencies | null>(),
     orphanPicked: new Set<string>(),
     removing: false,
@@ -281,25 +282,57 @@ function modByFile(file: string): resolve.Mod | undefined {
     return undefined;
 }
 
-function crashHTML(): string {
-    const c = state.crash;
-    if (!c) return '';
+function problemLines(c: main.Crash, count = 1): string {
     const who = c.culprit ? modName(c.culprit) : '';
     let text = c.error + (c.missing ? `: ${c.missing}` : '');
     if (c.cause) text = `${modName(c.cause)} has no ${c.missing}`;
     else if (c.jvmdg) text = `needs ${c.missing} from JvmDowngrader`;
+    else if (c.found && (c.error === 'NoClassDefFoundError' || c.error === 'ClassNotFoundException')) text = `${c.missing} could not be loaded`;
     else if (c.error === 'NoClassDefFoundError' || c.error === 'ClassNotFoundException') text = `${c.missing} is not in the modpack`;
-    const undo = [c.cause, c.culprit].map(f => f ? modByFile(f) : undefined).find(m => m && undoItem(m.key, installedFile(m)));
-    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2})/.exec(c.time);
-    const when = m ? ` ${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}, ${m[4]}` : '';
+    if (count > 1) text += ` (${count} times)`;
+    return `<p class="m3-reason m3-bad">${esc(who ? `${who}: ${text}` : text)}</p>
+        ${c.rootMissing && c.rootMissing !== c.missing ? `<p class="m3-reason m3-bad">${esc(`Caused by: ${c.rootMissing} ${c.rootJvmdg && !c.rootFound ? 'is missing from JvmDowngrader' : c.rootFound ? 'could not be loaded' : 'is not in the modpack'}`)}</p>` : ''}`;
+}
+
+function problemUndo(problems: main.Crash[]): string {
+    const undo = problems.flatMap(c => [c.cause, c.culprit]).map(f => f ? modByFile(f) : undefined).find(m => m && undoItem(m.key, installedFile(m)));
+    return undo ? `<a href="#" data-crash-undo="${esc(undo.id)}">Undo ${esc(undo.name)}</a>` : '';
+}
+
+function shortTime(time: string): string {
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2})/.exec(time);
+    return m ? ` ${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}, ${m[4]}` : '';
+}
+
+function crashHTML(): string {
+    const c = state.crash;
+    if (!c) return '';
     return `<div class="m3-last m3-crash">
-        <span class="m3-eyebrow">Crashed${esc(when)}</span>
-        <p class="m3-reason m3-bad">${esc(who ? `${who}: ${text}` : text)}</p>
-        ${c.rootMissing && c.rootMissing !== c.missing ? `<p class="m3-reason m3-bad">${esc(`Caused by: ${c.rootMissing} ${c.rootJvmdg ? 'is missing from JvmDowngrader' : c.rootFound ? 'could not be loaded' : 'is not in the modpack'}`)}</p>` : ''}
+        <span class="m3-eyebrow">Crashed${esc(shortTime(c.time))}</span>
+        ${problemLines(c)}
         <div class="m3-links">
-            ${undo ? `<a href="#" data-crash-undo="${esc(undo.id)}">Undo ${esc(undo.name)}</a>` : ''}
+            ${problemUndo([c])}
             <a href="#" id="crash-open">Open report</a>
             <a href="#" id="crash-dismiss">Dismiss</a>
+        </div>
+    </div>`;
+}
+
+function sameProblem(a: main.Crash, b: main.Crash): boolean {
+    return a.culprit === b.culprit && a.error === b.error && a.missing === b.missing && a.cause === b.cause;
+}
+
+function logHTML(): string {
+    const crash = state.crash;
+    const issues = (state.log?.issues ?? []).filter(i => !crash || !sameProblem(i.problem, crash));
+    if (!state.log || !issues.length) return '';
+    return `<div class="m3-last m3-crash">
+        <span class="m3-eyebrow">Errors in the game log${esc(shortTime(state.log.time))}</span>
+        ${issues.map(i => problemLines(i.problem, i.count)).join('')}
+        <div class="m3-links">
+            ${problemUndo(issues.map(i => i.problem))}
+            <a href="#" id="log-open">Open log</a>
+            <a href="#" id="log-dismiss">Dismiss</a>
         </div>
     </div>`;
 }
@@ -402,13 +435,24 @@ async function installMissing(modId: string) {
 }
 
 let compatSeq = 0;
+const dismissed = {crash: '', log: ''};
+
+function visibleCrash(c: main.Crash | null): main.Crash | null {
+    return c && c.file !== dismissed.crash ? c : null;
+}
+
+function visibleLog(l: main.LogIssues | null): main.LogIssues | null {
+    return l && l.key !== dismissed.log ? l : null;
+}
 
 async function refreshCrash() {
     const seq = compatSeq;
-    const crash = await Crash().catch(() => null);
+    const crash = visibleCrash(await Crash().catch(() => null));
+    const log = visibleLog(await LogProblems().catch(() => null));
     if (seq !== compatSeq || state.mode !== 'ready') return;
-    if (JSON.stringify(crash) === JSON.stringify(state.crash)) return;
+    if (JSON.stringify(crash) === JSON.stringify(state.crash) && JSON.stringify(log) === JSON.stringify(state.log)) return;
     state.crash = crash;
+    state.log = log;
     renderInspector();
 }
 
@@ -424,10 +468,12 @@ async function refreshCompat() {
     } catch {
         problems = [];
     }
-    const crash = await Crash().catch(() => null);
+    const crash = visibleCrash(await Crash().catch(() => null));
+    const log = visibleLog(await LogProblems().catch(() => null));
     if (seq !== compatSeq) return;
     state.problems = problems;
     state.crash = crash;
+    state.log = log;
     state.orphans = new Map();
     if (state.mode === 'ready' || state.mode === 'report') render();
 }
@@ -1144,6 +1190,7 @@ function inspectorHTML(): string {
     const line = (k: Kind, g: string, gc: string, label: string) => `<li><button type="button" class="m3-line" data-kind="${k}" aria-pressed="${on(k)}"><span class="g ${gc}">${g}</span><span class="${gc === 'm3-bad' ? 'm3-bad' : k === 'cur' ? 'm' : ''}"><span class="m3-num">${count(k)}</span> ${label}</span></button></li>`;
     return `<div class="m3-insp">
         ${crashHTML()}
+        ${logHTML()}
         <button type="button" class="m3-line m3-line--big" data-kind="up" aria-pressed="${on('up')}"><span class="m3-big m3-num" data-count="ready">${up}</span><span class="m3-big-l">${plural(up, 'update ready', 'updates ready')}</span></button>
         <div class="m3-split">
         <ul class="m3-lines">
@@ -1346,6 +1393,11 @@ async function runCheck() {
     if (!state.root || state.mode === 'checking' || state.mode === 'installing' || busyOps()) return;
     const previous = state.pack;
     const previousSteps = {stageSeen: state.stageSeen, counts: state.counts, matched: state.matched};
+    compatSeq++;
+    if (previous?.root !== state.root) {
+        state.crash = null;
+        state.log = null;
+    }
     state.mode = 'checking';
     state.error = '';
     state.notice = '';
@@ -1471,7 +1523,7 @@ function isRemote(s: string): boolean {
 }
 
 function busyOps(): boolean {
-    return state.installing > 0 || state.undoActive.length > 0 || state.adding.length > 0 || state.removing;
+    return state.installing > 0 || state.undoActive.length > 0 || state.adding.length > 0 || state.removing || !!state.choosing;
 }
 
 function installDone(): number {
@@ -1905,8 +1957,22 @@ $('insp').addEventListener('click', e => {
     }
     if (el.closest('#crash-dismiss') && state.crash) {
         e.preventDefault();
+        dismissed.crash = state.crash.file;
         DismissCrash(state.crash.file).catch(() => {});
         state.crash = null;
+        renderInspector();
+        return;
+    }
+    if (el.closest('#log-open') && state.log) {
+        e.preventDefault();
+        OpenLog();
+        return;
+    }
+    if (el.closest('#log-dismiss') && state.log) {
+        e.preventDefault();
+        dismissed.log = state.log.key;
+        DismissLog(state.log.key).catch(() => {});
+        state.log = null;
         renderInspector();
         return;
     }

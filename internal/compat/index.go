@@ -240,6 +240,9 @@ func classRefs(path string, skip map[string]bool) (map[string]bool, error) {
 		for _, r := range c.Refs {
 			out[r.Owner+"."+r.Name] = true
 		}
+		for _, name := range c.Classes {
+			out[name] = true
+		}
 	}
 	return out, nil
 }

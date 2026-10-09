@@ -44,7 +44,7 @@ func knownRepo(m *Mod) string {
 }
 
 func releaseJar(rel *github.Release, installed, mcVersion string) *github.Asset {
-	jars := rel.Jars(Stem, Stem(installed))
+	jars := forMinecraft(rel.Jars(Stem, Stem(installed)), mcVersion)
 	var best *github.Asset
 	tag := strings.TrimPrefix(strings.ToLower(rel.Tag), "v")
 	for i := range jars {
@@ -63,4 +63,38 @@ func releaseJar(rel *github.Release, installed, mcVersion string) *github.Asset 
 		}
 	}
 	return best
+}
+
+func forMinecraft(jars []github.Asset, mcVersion string) []github.Asset {
+	var own []github.Asset
+	for _, a := range jars {
+		if mcVersion != "" && strings.Contains(a.Name, mcVersion) {
+			own = append(own, a)
+		}
+	}
+	if len(own) > 0 {
+		return own
+	}
+	return jars
+}
+
+func renamedGitHubJar(releases []github.Release, installed, mcVersion string) (*github.Release, *github.Asset) {
+	var best *github.Release
+	var asset *github.Asset
+	for i := range releases {
+		rel := &releases[i]
+		if rel.Draft || rel.Prerelease || best != nil && !rel.Published.After(best.Published) {
+			continue
+		}
+		for _, a := range forMinecraft(rel.Jars(Stem, ""), mcVersion) {
+			if sharesStem(a.Name, installed) && !isVariantOf(a.Name, installed) {
+				best, asset = rel, &a
+				break
+			}
+		}
+	}
+	if asset == nil || sameVersion(asset.Name, installed, mcVersion) || OlderVersion(asset.Name, installed, mcVersion) {
+		return nil, nil
+	}
+	return best, asset
 }

@@ -107,7 +107,7 @@ func (p *Pack) MarkInstalled(m *Mod) {
 	}
 }
 
-func (p *Pack) Versions(ctx context.Context, id, curseForgeKey string) ([]Choice, error) {
+func (p *Pack) Versions(ctx context.Context, id, curseForgeKey, cacheDir string) ([]Choice, error) {
 	found := p.find(id)
 	if found == nil {
 		return nil, errors.New("mod not found")
@@ -146,14 +146,18 @@ func (p *Pack) Versions(ctx context.Context, id, curseForgeKey string) ([]Choice
 			add(Choice{ID: "gtnh:" + strconv.Itoa(i), Version: v.Tag, FileName: v.Filename, Date: t.Date, Pre: v.Prerelease}, ch)
 		}
 	case m.gh != "":
-		releases, err := github.Releases(ctx, m.gh)
+		res, err := github.Releases(ctx, m.gh, cacheDir)
 		if err != nil {
 			return nil, err
 		}
+		releases := res.Releases
 		slices.SortFunc(releases, func(a, b github.Release) int { return b.Published.Compare(a.Published) })
 		for _, rel := range releases {
+			if rel.Draft {
+				continue
+			}
 			jar := releaseJar(&rel, m.FileName, p.MCVersion)
-			if rel.Draft || jar == nil {
+			if jar == nil {
 				continue
 			}
 			t := &Target{Version: rel.Tag, FileName: jar.Name, Date: rel.Published.Format(time.DateOnly), PageURL: rel.HTMLURL, DownloadURL: jar.URL}

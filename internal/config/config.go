@@ -15,6 +15,7 @@ type Pack struct {
 	Server    *string           `json:"server,omitempty"`
 	ServerKey string            `json:"serverKey,omitempty"`
 	CrashSeen string            `json:"crashSeen,omitempty"`
+	LogSeen   string            `json:"logSeen,omitempty"`
 	Sides     map[string]string `json:"sides,omitempty"`
 }
 
@@ -231,6 +232,19 @@ func (s *Store) CrashSeen(pack string) string {
 
 func (s *Store) SetCrashSeen(pack, file string) error {
 	return s.Update(func(c *Config) { s.pack(c, pack).CrashSeen = file })
+}
+
+func (s *Store) LogSeen(pack string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.cfg.Packs[pack]; p != nil {
+		return p.LogSeen
+	}
+	return ""
+}
+
+func (s *Store) SetLogSeen(pack, key string) error {
+	return s.Update(func(c *Config) { s.pack(c, pack).LogSeen = key })
 }
 
 func (s *Store) Side(pack, key string) string {
