@@ -153,7 +153,7 @@ func one(ctx context.Context, pack *resolve.Pack, m *resolve.Mod, session *backu
 		}
 	}
 
-	part := filepath.Join(dir, ".modhound-"+randomHex()+".part")
+	part := filepath.Join(dir, ".modhound-"+RandomHex()+".part")
 	defer os.Remove(part)
 	if _, err := fetch(ctx, pack, m.FileName, t, part, progress); err != nil {
 		return err
@@ -173,7 +173,7 @@ func Add(ctx context.Context, pack *resolve.Pack, modID string, t *resolve.Targe
 	if _, err := os.Stat(dest); err == nil {
 		return "", fmt.Errorf("%s already exists", t.FileName)
 	}
-	part := filepath.Join(pack.ModsDir, ".modhound-"+randomHex()+".part")
+	part := filepath.Join(pack.ModsDir, ".modhound-"+RandomHex()+".part")
 	defer os.Remove(part)
 	j, err := fetch(ctx, pack, modID, t, part, progress)
 	if err != nil {
@@ -272,7 +272,12 @@ func replaceKeeping(session *backup.Session, m *resolve.Mod, part, dest string) 
 		}
 		return fmt.Errorf("cannot place the new file: %w", err)
 	}
-	session.Add(item)
+	if err := session.Add(item); err != nil {
+		if os.Rename(dest, part) == nil && undo() == nil {
+			return err
+		}
+		return fmt.Errorf("%w, and the old file could not be put back: it is in %s", err, filepath.Dir(session.Stored(item)))
+	}
 	return nil
 }
 
@@ -288,7 +293,7 @@ func download(ctx context.Context, url, path string, progress func(done, size in
 	return f.Close()
 }
 
-func randomHex() string {
+func RandomHex() string {
 	b := make([]byte, 6)
 	rand.Read(b)
 	return hex.EncodeToString(b)

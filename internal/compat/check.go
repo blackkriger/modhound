@@ -136,6 +136,9 @@ func (p *pack) resolve(r ref) (outcome, int) {
 			if slices.Contains(c.Members, want) {
 				return found, i
 			}
+			if r.Name == "<init>" {
+				continue
+			}
 			queue = append(queue, c.Super)
 			queue = append(queue, c.Ifaces...)
 		}
@@ -433,6 +436,9 @@ func describe(r ref) string {
 	name := dotted(r.Owner)
 	if i := strings.LastIndex(name, "."); i >= 0 {
 		name = name[i+1:]
+	}
+	if r.Kind == refMethod && r.Name == "<init>" {
+		return "new " + name + "()"
 	}
 	if r.Kind == refMethod {
 		return name + "." + r.Name + "()"

@@ -153,20 +153,24 @@ func (s *Session) Keep(f fsx.FS, oldPath, store string, item *Item) (func() erro
 	return func() error { return f.Rename(stored, oldPath) }, nil
 }
 
-func (s *Session) Add(item Item) {
+func (s *Session) Add(item Item) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Items = append(s.Items, item)
 	if err := s.write(); err != nil {
+		s.Items = s.Items[:len(s.Items)-1]
 		logx.Printf("backup record of %s not written: %v", item.OldFile, err)
+		return fmt.Errorf("cannot write the backup record: %w", err)
 	}
+	return nil
 }
 
 func (s *Session) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.Items) == 0 {
-		os.RemoveAll(s.dir)
+		os.Remove(filepath.Join(s.dir, "session.json"))
+		os.Remove(s.dir)
 		return nil
 	}
 	if err := s.write(); err != nil {
@@ -367,22 +371,32 @@ func (s *Session) restore(it Item) error {
 		return nil
 	}
 	original := f.Join(it.Dir, it.OldFile)
+	aside := current + ".modhound-undo"
+	if !f.Exists(current) && f.Exists(aside) {
+		if err := f.Rename(aside, current); err != nil {
+			return fmt.Errorf("%s was left as %s by an earlier undo and cannot be renamed back: %w", it.NewFile, f.Base(aside), err)
+		}
+	}
 	if !strings.EqualFold(current, original) && f.Exists(original) {
 		return fmt.Errorf("%s already exists", it.OldFile)
 	}
-	if !f.Exists(current) {
+	hasCurrent := f.Exists(current)
+	if !hasCurrent {
 		if other := otherVersion(f, it); other != "" {
 			return fmt.Errorf("%s is in the folder now, restoring %s would leave two versions of the mod", other, it.OldFile)
 		}
 	}
-	aside := current + ".modhound-undo"
-	if f.Exists(current) {
+	if hasCurrent {
 		if err := f.Rename(current, aside); err != nil {
 			return fmt.Errorf("cannot remove the new file (is the game running?): %w", err)
 		}
 	}
 	if err := f.Rename(stored, original); err != nil {
-		f.Rename(aside, current)
+		if hasCurrent {
+			if backErr := f.Rename(aside, current); backErr != nil {
+				return fmt.Errorf("cannot put the old file back (%w), and %s is left as %s, so the mod is not loaded; undo again to finish", err, it.NewFile, f.Base(aside))
+			}
+		}
 		return fmt.Errorf("cannot put the old file back: %w", err)
 	}
 	f.Remove(aside)
@@ -419,7 +433,9 @@ func PurgeRemoved(root, pack string, remote bool, before string) int {
 		for _, s := range sessions {
 			waiting := map[string]bool{}
 			for _, it := range s.Items {
-				waiting[it.UndoKey()] = it.Pair != "" && !it.Restored && s.pairRestored(it) && !modBack(it)
+				if (it.Remote != "") == remote {
+					waiting[it.UndoKey()] = it.Pair != "" && !it.Restored && s.pairRestored(it) && !modBack(it)
+				}
 			}
 			kept := s.Items[:0]
 			changed := false

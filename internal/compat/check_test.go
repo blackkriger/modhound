@@ -156,3 +156,22 @@ func TestGameVersionMismatch(t *testing.T) {
 		t.Fatalf("game problems = %v, want %v", got, want)
 	}
 }
+
+func TestConstructorsAreNotInherited(t *testing.T) {
+	lib := &Index{Classes: map[string]*Class{
+		"lib/Base": {Super: "java/lang/Object", Members: []string{member(refMethod, "<init>", "(I)V")}},
+		"lib/Foo":  {Super: "lib/Base", Members: []string{member(refMethod, "<init>", "()V")}},
+	}, Deps: map[string][]string{}}
+	user := &Index{Classes: map[string]*Class{}, Deps: map[string][]string{}, Refs: []ref{
+		{Kind: refMethod, Owner: "lib/Foo", Name: "<init>", Desc: "(I)V"},
+		{Kind: refMethod, Owner: "lib/Foo", Name: "<init>", Desc: "()V"},
+		{Kind: refMethod, Owner: "lib/Foo", Name: "hashCode", Desc: "()I"},
+	}}
+	var got []string
+	for _, p := range Check([]Jar{{Name: "lib.jar", Index: lib}, {Name: "user.jar", Index: user}}, Env{}) {
+		got = append(got, p.Details...)
+	}
+	if want := []string{"new Foo()"}; !slices.Equal(got, want) {
+		t.Fatalf("details = %v, want %v", got, want)
+	}
+}

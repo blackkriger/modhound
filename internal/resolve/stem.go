@@ -10,12 +10,13 @@ var (
 	versionish  = regexp.MustCompile(`^[a-z]{0,2}\d+[a-z]?\d*$`)
 	stemDropped = map[string]bool{"jar": true, "zip": true, "mc": true, "v": true, "r": true, "b": true, "beta": true, "alpha": true, "release": true, "final": true, "hotfix": true, "pre": true}
 	variantTags = map[string]bool{"dev": true, "deobf": true, "sources": true, "src": true, "api": true, "javadoc": true, "slim": true, "lib": true, "nodep": true, "client": true, "server": true}
+	stageTag    = regexp.MustCompile(`^(?:(?:alpha|beta|pre|rc|snapshot)\d*|build\d+)$`)
 )
 
 func stemTokens(fileName string) []string {
 	var out []string
 	for _, t := range stemSplit.Split(strings.ToLower(fileName), -1) {
-		if t == "" || stemDropped[t] || versionish.MatchString(t) {
+		if t == "" || stemDropped[t] || versionish.MatchString(t) || stageTag.MatchString(t) {
 			continue
 		}
 		out = append(out, t)
@@ -64,10 +65,23 @@ var versionSplit = regexp.MustCompile(`[-_+ \[\]()]+`)
 func FileVersion(fileName, mcVersion string) string {
 	name := strings.TrimSuffix(strings.TrimSuffix(fileName, ".jar"), ".zip")
 	tokens := versionSplit.Split(name, -1)
+	shortMC, numbered := "", 0
+	if i := strings.LastIndex(mcVersion, "."); strings.Count(mcVersion, ".") == 2 {
+		shortMC = mcVersion[:i]
+	}
+	for _, t := range tokens {
+		if strings.ContainsAny(t, "0123456789") {
+			numbered++
+		}
+	}
 	var out []string
 	for i, t := range tokens {
 		lt := strings.ToLower(t)
-		if t == "" || lt == mcVersion || lt == "mc"+mcVersion || !strings.ContainsAny(t, "0123456789") {
+		if len(out) > 0 && preRelease[lt] > 1 {
+			out = append(out, t)
+			continue
+		}
+		if t == "" || lt == mcVersion || lt == "mc"+mcVersion || shortMC != "" && numbered > 1 && (lt == shortMC || lt == "mc"+shortMC) || !strings.ContainsAny(t, "0123456789") {
 			continue
 		}
 		if i == 0 && len(tokens) > 1 && !strings.ContainsAny(t[:1], "0123456789") {
@@ -84,6 +98,9 @@ func FileVersion(fileName, mcVersion string) string {
 }
 
 func sameVersion(a, b, mcVersion string) bool {
+	if c, ok := CompareVersions(a, b, mcVersion); ok {
+		return c == 0
+	}
 	x := strings.TrimPrefix(strings.ToLower(FileVersion(a, mcVersion)), "v")
 	y := strings.TrimPrefix(strings.ToLower(FileVersion(b, mcVersion)), "v")
 	return x != "" && x == y
@@ -125,20 +142,24 @@ func CompareVersions(a, b, mcVersion string) (int, bool) {
 		}
 	}
 	switch {
-	case len(x) == len(y):
-		return 0, true
 	case len(x) > len(y):
-		return tailOrder(x[len(y)]), true
-	default:
-		return -tailOrder(y[len(x)]), true
+		return tailOrder(x[len(y):]), true
+	case len(y) > len(x):
+		return -tailOrder(y[len(x):]), true
 	}
+	return 0, true
 }
 
-func tailOrder(next string) int {
-	if preRelease[next] > 0 {
+func tailOrder(rest []string) int {
+	if preRelease[rest[0]] > 0 {
 		return -1
 	}
-	return 1
+	for _, t := range rest {
+		if strings.Trim(t, "0") != "" {
+			return 1
+		}
+	}
+	return 0
 }
 
 func cmpInt(a, b int) int {

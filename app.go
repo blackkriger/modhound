@@ -1203,12 +1203,19 @@ func (a *App) Remove(ids []string) (*RemoveResult, error) {
 		if m.Jar != nil {
 			item.ModIDs = m.Jar.ModIDs
 		}
-		if _, err := session.Keep(fsx.Local, m.Path, "", &item); err != nil {
+		undo, err := session.Keep(fsx.Local, m.Path, "", &item)
+		if err == nil {
+			if err = session.Add(item); err != nil {
+				if undoErr := undo(); undoErr != nil {
+					err = fmt.Errorf("%w, and the file could not be put back: it is in %s", err, filepath.Dir(session.Stored(item)))
+				}
+			}
+		}
+		if err != nil {
 			logx.Printf("remove %s: %v", m.FileName, err)
 			out.Failed = append(out.Failed, fmt.Sprintf("%s (%v)", m.Name, err))
 			continue
 		}
-		session.Add(item)
 		pack.Remove(m.Path)
 		out.Removed = append(out.Removed, m.ID)
 		logx.Printf("removed %s", m.FileName)

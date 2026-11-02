@@ -94,3 +94,29 @@ func TestModrinthSide(t *testing.T) {
 		}
 	}
 }
+
+func TestPreReleaseAndShortMinecraftVersions(t *testing.T) {
+	for _, c := range [][2]string{
+		{"Mod-1.7.10-2.0-beta1.jar", "Mod-1.7.10-2.0.jar"},
+		{"Mod-1.7.10-2.0-beta.jar", "Mod-1.7.10-2.0.jar"},
+		{"Mod-1.7.10-2.0-beta-2.jar", "Mod-1.7.10-2.0.jar"},
+		{"Mod-1.7.10-2.0-rc.jar", "Mod-1.7.10-2.0.jar"},
+		{"Mod-1.7-1.1.jar", "Mod-1.7.10-1.2.jar"},
+	} {
+		if Stem(c[0]) != Stem(c[1]) {
+			t.Errorf("%s and %s must share a stem, got %q and %q", c[0], c[1], Stem(c[0]), Stem(c[1]))
+		}
+		if !OlderVersion(c[0], c[1], "1.7.10") || sameVersion(c[0], c[1], "1.7.10") {
+			t.Errorf("%s must be older than %s", c[0], c[1])
+		}
+	}
+	if !sameVersion("Mod-2.0.jar", "Mod-2.0.0.jar", "1.7.10") || OlderVersion("Mod-2.0.jar", "Mod-2.0.0.jar", "1.7.10") {
+		t.Error("2.0 and 2.0.0 are the same version")
+	}
+	if Stem("Mod-1.7.10-2.0-dev.jar") == Stem("Mod-1.7.10-2.0.jar") {
+		t.Error("a dev jar is a variant, not the same file")
+	}
+	if got := FileVersion("Mod-1.7.jar", "1.7.10"); got != "1.7" {
+		t.Errorf("a lone 1.7 is the mod version, got %q", got)
+	}
+}

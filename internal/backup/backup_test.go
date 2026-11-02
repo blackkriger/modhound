@@ -413,3 +413,44 @@ func TestPurgeDropsServerCopyOnceModIsBack(t *testing.T) {
 		t.Fatal("stale server backup kept")
 	}
 }
+
+func TestRestoreFinishesAnInterruptedUndo(t *testing.T) {
+	root, mods := t.TempDir(), t.TempDir()
+	oldPath := filepath.Join(mods, "mod-1.0.jar")
+	newPath := filepath.Join(mods, "mod-1.1.jar")
+	os.WriteFile(oldPath, []byte("old"), 0o644)
+	s := Begin(root, mods)
+	item := Item{Key: "k", Name: "Mod", Dir: mods, OldFile: "mod-1.0.jar", NewFile: "mod-1.1.jar"}
+	if _, err := s.Keep(fsx.Local, oldPath, "", &item); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(newPath+".modhound-undo", []byte("new"), 0o644)
+	s.Add(item)
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	res := All(root, mods)[0].Restore(map[string]bool{"k|mod-1.1.jar": true})
+	if len(res) != 1 || !res[0].OK {
+		t.Fatalf("restore: %+v", res)
+	}
+	if b, _ := os.ReadFile(oldPath); string(b) != "old" {
+		t.Fatal("old file was not put back")
+	}
+	for _, p := range []string{newPath, newPath + ".modhound-undo"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s is still there", filepath.Base(p))
+		}
+	}
+}
+
+func TestEmptySaveKeepsForeignFiles(t *testing.T) {
+	root, mods := t.TempDir(), t.TempDir()
+	s := Begin(root, mods)
+	os.MkdirAll(s.dir, 0o755)
+	kept := filepath.Join(s.dir, "mod-1.0.jar")
+	os.WriteFile(kept, []byte("old"), 0o644)
+	s.Save()
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatal("an empty save removed a file another update had just kept")
+	}
+}

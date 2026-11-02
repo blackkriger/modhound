@@ -180,7 +180,7 @@ func (p *Pack) findCurseForge(ctx context.Context, cf *curseforge.Client, modID,
 		for i := range files {
 			f := &files[i]
 			if !f.IsAvailable || f.DownloadURL == "" || !slices.Contains(f.GameVersions, p.MCVersion) ||
-				slices.ContainsFunc(f.GameVersions, func(g string) bool { return slices.Contains(foreignLoaders, g) }) {
+				otherLoader(f.GameVersions) {
 				continue
 			}
 			if best == nil || f.ReleaseType < best.ReleaseType || f.ReleaseType == best.ReleaseType && f.FileDate.After(best.FileDate) {

@@ -233,7 +233,7 @@ func syncOne(f fsx.FS, store string, session *backup.Session, it Item, mcVersion
 	if (it.add || !strings.EqualFold(dest, it.serverPath)) && f.Exists(dest) {
 		return fmt.Errorf("%s already exists on the server", it.ClientFile)
 	}
-	part := f.Join(dir, ".modhound-sync.part")
+	part := f.Join(dir, ".modhound-"+install.RandomHex()+".part")
 	if err := f.Upload(it.clientPath, part); err != nil {
 		f.Remove(part)
 		return fmt.Errorf("cannot copy %s to the server: %w", it.ClientFile, err)
@@ -260,7 +260,13 @@ func syncOne(f fsx.FS, store string, session *backup.Session, it Item, mcVersion
 		f.Remove(part)
 		return fmt.Errorf("cannot place the new file: %w", err)
 	}
-	session.Add(item)
+	if err := session.Add(item); err != nil {
+		if f.Rename(dest, part) == nil && undo() == nil {
+			f.Remove(part)
+			return err
+		}
+		return fmt.Errorf("%w, and the old server file could not be put back: it is in %s", err, f.Dir(session.Stored(item)))
+	}
 	return nil
 }
 
@@ -314,8 +320,11 @@ func Remove(ctx context.Context, root string, mods, remaining []Mod, session *ba
 			}
 			if err == nil {
 				item := backup.Item{Key: KeyPrefix + m.Key, Name: m.Name, Dir: f.Dir(p), OldFile: name, From: resolve.FileVersion(name, mcVersion), Removed: true, Pair: backup.RemovedKey(m.Key, m.FileName)}
-				if _, err = session.Keep(f, p, store, &item); err == nil {
-					session.Add(item)
+				var undo func() error
+				if undo, err = session.Keep(f, p, store, &item); err == nil {
+					if err = session.Add(item); err != nil && undo() != nil {
+						err = fmt.Errorf("%w, and the file could not be put back: it is in %s", err, f.Dir(session.Stored(item)))
+					}
 				}
 			}
 			if err != nil {

@@ -28,12 +28,12 @@ var (
 	}
 )
 
-const maxLogSize = 64 << 20
+const maxLogBlocks = 1000
 
 func LatestLog(root string) (*LogReport, error) {
 	p := filepath.Join(root, "logs", "latest.log")
 	st, err := os.Stat(p)
-	if err != nil || st.Size() > maxLogSize {
+	if err != nil {
 		return nil, nil
 	}
 	f, err := os.Open(p)
@@ -66,7 +66,7 @@ func ParseLog(f io.Reader) *LogReport {
 	var c *Cause
 	wanted, pending := false, false
 	flush := func() {
-		if len(block) > 0 && (wanted || hasLinkage(block)) {
+		if len(block) > 0 && len(r.Blocks) < maxLogBlocks && (wanted || hasLinkage(block)) {
 			r.Blocks = append(r.Blocks, block)
 		}
 		block, c, wanted = nil, nil, false

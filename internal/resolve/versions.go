@@ -174,7 +174,7 @@ func (p *Pack) Versions(ctx context.Context, id, curseForgeKey, cacheDir string)
 		slices.SortFunc(files, func(a, b curseforge.File) int { return b.FileDate.Compare(a.FileDate) })
 		stem := Stem(m.cf.file.FileName)
 		for _, f := range files {
-			if !f.IsAvailable || Stem(f.FileName) != stem || !slices.Contains(f.GameVersions, p.MCVersion) || slices.ContainsFunc(f.GameVersions, func(g string) bool { return slices.Contains(foreignLoaders, g) }) {
+			if !f.IsAvailable || Stem(f.FileName) != stem || !slices.Contains(f.GameVersions, p.MCVersion) || otherLoader(f.GameVersions) {
 				continue
 			}
 			t := &Target{Version: f.DisplayName, FileName: f.FileName, Date: f.FileDate.Format(time.DateOnly), PageURL: strings.TrimRight(m.URL, "/") + "/files/" + strconv.Itoa(f.ID), DownloadURL: f.DownloadURL, SHA1: f.SHA1()}

@@ -149,6 +149,9 @@ func (l *Platform) missing(r ref) bool {
 		if slices.Contains(c.Members, want) {
 			return false
 		}
+		if r.Name == "<init>" {
+			return true
+		}
 		queue = append(queue, c.Super)
 		queue = append(queue, c.Ifaces...)
 	}

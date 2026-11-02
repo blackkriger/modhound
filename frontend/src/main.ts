@@ -450,9 +450,11 @@ function visibleLog(l: main.LogIssues | null): main.LogIssues | null {
 
 async function refreshCrash() {
     const seq = compatSeq;
-    const crash = visibleCrash(await Crash().catch(() => null));
-    const log = visibleLog(await LogProblems().catch(() => null));
+    const latestCrash = await Crash().catch(() => null);
+    const latestLog = await LogProblems().catch(() => null);
     if (seq !== compatSeq || state.mode !== 'ready') return;
+    const crash = visibleCrash(latestCrash);
+    const log = visibleLog(latestLog);
     if (JSON.stringify(crash) === JSON.stringify(state.crash) && JSON.stringify(log) === JSON.stringify(state.log)) return;
     state.crash = crash;
     state.log = log;
@@ -471,12 +473,12 @@ async function refreshCompat() {
     } catch {
         problems = [];
     }
-    const crash = visibleCrash(await Crash().catch(() => null));
-    const log = visibleLog(await LogProblems().catch(() => null));
+    const latestCrash = await Crash().catch(() => null);
+    const latestLog = await LogProblems().catch(() => null);
     if (seq !== compatSeq) return;
     state.problems = problems;
-    state.crash = crash;
-    state.log = log;
+    state.crash = visibleCrash(latestCrash);
+    state.log = visibleLog(latestLog);
     state.orphans = new Map();
     if (state.mode === 'ready' || state.mode === 'report') render();
 }
@@ -1396,6 +1398,7 @@ EventsOn('install', (e: { id: string; state: string; percent: number; error: str
 async function runCheck() {
     if (!state.root || state.mode === 'checking' || state.mode === 'installing' || busyOps()) return;
     const previous = state.pack;
+    const previousMods = state.mods;
     const previousSteps = {stageSeen: state.stageSeen, counts: state.counts, matched: state.matched};
     compatSeq++;
     if (previous?.root !== state.root) {
@@ -1445,7 +1448,7 @@ async function runCheck() {
     } catch (e) {
         const err = String(e);
         if (err === 'stopped' && previous) {
-            state.mods = new Map(previous.mods.map(m => [m.id, m]));
+            state.mods = previousMods;
             state.stageSeen = previousSteps.stageSeen;
             state.counts = previousSteps.counts;
             state.matched = previousSteps.matched;
@@ -1670,6 +1673,8 @@ async function runUpdate(ids: string[]) {
 
 function closeSettings(): boolean {
     if (!state.settingsOpen) return false;
+    const focused = document.activeElement?.id ?? '';
+    if (focused === 'cf-key' || focused === 'srv-dir' || focused === 'srv-key') autosave();
     state.settingsOpen = false;
     applyTheme();
     if (!state.recheck || !state.root || busyOps() || (state.mode !== 'ready' && state.mode !== 'report' && state.mode !== 'empty')) return false;

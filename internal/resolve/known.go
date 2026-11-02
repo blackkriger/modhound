@@ -1,6 +1,7 @@
 package resolve
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/blackkriger/modhound/internal/github"
@@ -75,7 +76,35 @@ func forMinecraft(jars []github.Asset, mcVersion string) []github.Asset {
 	if len(own) > 0 {
 		return own
 	}
-	return jars
+	var neutral []github.Asset
+	for _, a := range jars {
+		if !forOtherMinecraft(a.Name, mcVersion) {
+			neutral = append(neutral, a)
+		}
+	}
+	return neutral
+}
+
+var minecraftToken = regexp.MustCompile(`^(mc)?1\.\d+(\.\d+)?$`)
+
+func forOtherMinecraft(fileName, mcVersion string) bool {
+	tokens := versionSplit.Split(strings.ToLower(strings.TrimSuffix(fileName, ".jar")), -1)
+	numbered := 0
+	for _, t := range tokens {
+		if strings.ContainsAny(t, "0123456789") {
+			numbered++
+		}
+	}
+	for _, t := range tokens {
+		m := minecraftToken.FindStringSubmatch(t)
+		if m == nil || strings.TrimPrefix(t, "mc") == mcVersion || strings.HasPrefix(mcVersion, strings.TrimPrefix(t, "mc")+".") {
+			continue
+		}
+		if m[1] != "" || numbered > 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func renamedGitHubJar(releases []github.Release, installed, mcVersion string) (*github.Release, *github.Asset) {

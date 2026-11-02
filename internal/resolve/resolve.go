@@ -762,6 +762,10 @@ func (r *resolver) fillCurseDownload(ctx context.Context, m *Mod, cfFile *gtnh.C
 
 var foreignLoaders = []string{"Fabric", "Quilt", "NeoForge", "LiteLoader"}
 
+func otherLoader(tags []string) bool {
+	return !slices.Contains(tags, "Forge") && slices.ContainsFunc(tags, func(g string) bool { return slices.Contains(foreignLoaders, g) })
+}
+
 func (r *resolver) resolveCurseForge(ctx context.Context, m *Mod) error {
 	cur := m.cf.file
 	files, err := r.cf.Files(ctx, m.cf.modID, r.pack.MCVersion)
@@ -786,11 +790,11 @@ func (r *resolver) resolveCurseForge(ctx context.Context, m *Mod) error {
 			reason = "not newer"
 		case !slices.Contains(f.GameVersions, r.pack.MCVersion):
 			reason = "not tagged for " + r.pack.MCVersion
-		case slices.ContainsFunc(f.GameVersions, func(g string) bool { return slices.Contains(foreignLoaders, g) }):
+		case otherLoader(f.GameVersions):
 			reason = "other loader"
 		case Stem(f.FileName) != curStem:
 			reason = fmt.Sprintf("different name %q vs %q", Stem(f.FileName), curStem)
-			if sharesStem(f.FileName, cur.FileName) && !isVariantOf(f.FileName, cur.FileName) && (renamed == nil || f.FileDate.After(renamed.FileDate)) {
+			if sharesStem(f.FileName, cur.FileName) && !isVariantOf(f.FileName, cur.FileName) && !sameVersion(f.FileName, cur.FileName, r.pack.MCVersion) && !OlderVersion(f.FileName, cur.FileName, r.pack.MCVersion) && (renamed == nil || f.FileDate.After(renamed.FileDate)) {
 				renamed = f
 			}
 		case sameVersion(f.FileName, cur.FileName, r.pack.MCVersion):

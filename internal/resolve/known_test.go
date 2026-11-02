@@ -67,3 +67,14 @@ func TestRenamedGitHubJar(t *testing.T) {
 		t.Errorf("same file must not count as renamed: %v", jar)
 	}
 }
+
+func TestReleaseJarSkipsOtherMinecraft(t *testing.T) {
+	rel := &github.Release{Tag: "3.0", Assets: []github.Asset{{Name: "Mod-1.12.2-3.0.jar"}, {Name: "Mod-mc1.20.1-3.0.jar"}}}
+	if got := releaseJar(rel, "Mod-1.7.10-2.0.jar", "1.7.10"); got != nil {
+		t.Errorf("got %v, want nothing for 1.7.10", got)
+	}
+	plain := &github.Release{Tag: "1.12", Assets: []github.Asset{{Name: "Mod-1.12.jar"}}}
+	if got := releaseJar(plain, "Mod-1.11.jar", "1.7.10"); got == nil {
+		t.Error("a lone 1.12 is the mod version")
+	}
+}

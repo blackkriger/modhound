@@ -1,6 +1,7 @@
 package crash
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,14 +38,19 @@ func Latest(root string) (*Report, error) {
 	var newest string
 	var newestTime time.Time
 	for _, p := range paths {
-		if st, err := os.Stat(p); err == nil && st.Size() <= maxSize && st.ModTime().After(newestTime) {
+		if st, err := os.Stat(p); err == nil && st.ModTime().After(newestTime) {
 			newest, newestTime = p, st.ModTime()
 		}
 	}
 	if newest == "" {
 		return nil, nil
 	}
-	data, err := os.ReadFile(newest)
+	f, err := os.Open(newest)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxSize))
+	f.Close()
 	if err != nil {
 		return nil, err
 	}

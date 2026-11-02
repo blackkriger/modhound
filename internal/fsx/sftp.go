@@ -191,13 +191,13 @@ func dial(t Target, keyPath string) (*conn, error) {
 		raw.Close()
 		return nil, fmt.Errorf("cannot connect to %s: %w", t.Host, err)
 	}
-	raw.SetDeadline(time.Time{})
 	client := ssh.NewClient(sc, chans, reqs)
 	files, err := sftp.NewClient(client, sftp.UseConcurrentWrites(true))
 	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("%s does not allow SFTP: %w", t.Host, err)
 	}
+	raw.SetDeadline(time.Time{})
 	c := &conn{ssh: client, sftp: files, done: make(chan struct{})}
 	go func() {
 		client.Wait()
@@ -250,6 +250,13 @@ func connect(t Target) (*conn, error) {
 	c, err := dial(t, key)
 	if err != nil {
 		return nil, err
+	}
+	for other, old := range pool {
+		if other != id && strings.HasPrefix(other, t.String()+"|") {
+			old.sftp.Close()
+			old.ssh.Close()
+			delete(pool, other)
+		}
 	}
 	pool[id] = c
 	return c, nil
