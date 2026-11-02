@@ -213,3 +213,28 @@ func TestSidesInCompare(t *testing.T) {
 		t.Fatalf("backup: %+v", items)
 	}
 }
+
+func TestCompareNonDottedVersions(t *testing.T) {
+	base := t.TempDir()
+	client := filepath.Join(base, "client", "mods")
+	srv := filepath.Join(base, "server", "mods")
+	os.MkdirAll(client, 0o755)
+	os.MkdirAll(srv, 0o755)
+	writeJar(t, filepath.Join(client, "ae-rv3-beta-1096-GTNH.jar"), "ae", "new")
+	writeJar(t, filepath.Join(srv, "ae-rv3-beta-926-GTNH.jar"), "ae", "old")
+	writeJar(t, filepath.Join(client, "Odd-12.jar"), "odd", "new")
+	writeJar(t, filepath.Join(srv, "Odd-r11.jar"), "odd", "old")
+	writeJar(t, filepath.Join(client, "Ahead-1.0.jar"), "ahead", "old")
+	writeJar(t, filepath.Join(srv, "Ahead-1.1.jar"), "ahead", "new")
+	diff, err := Compare(Snapshot(clientPack(t, client)), "1.7.10", filepath.Dir(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, it := range diff.Items {
+		got[it.ServerFile] = it.Differs
+	}
+	if differs, ok := got["ae-rv3-beta-926-GTNH.jar"]; len(got) != 2 || !ok || differs || !got["Odd-r11.jar"] {
+		t.Fatalf("items: %+v", diff.Items)
+	}
+}

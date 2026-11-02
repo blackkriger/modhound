@@ -76,6 +76,7 @@ const state = {
     draftServer: '',
     draftServerKey: '',
     serverBehind: 0,
+    serverDiffers: 0,
     syncing: false,
     serverEnter: false,
     recheck: false,
@@ -346,11 +347,12 @@ function modName(file: string): string {
 
 function problemNote(m: resolve.Mod): { text: string; severe: boolean } {
     const {own, caused} = problemsOf(m);
-    const first = own.find(p => p.kind === 'duplicate') ?? own.find(p => p.severe) ?? own[0];
+    const first = own.find(p => p.kind === 'duplicate') ?? own.find(p => p.kind === 'game') ?? own.find(p => p.severe) ?? own[0];
     if (first?.kind === 'api') return {text: first.severe ? `incompatible with ${modName(first.cause)}` : `may not work with ${modName(first.cause)}`, severe: first.severe};
     if (first?.kind === 'jvmdg') return {text: 'needs JvmDowngrader classes', severe: true};
     if (first?.kind === 'missing') return {text: `requires ${first.cause}`, severe: true};
     if (first?.kind === 'duplicate') return {text: `duplicate of ${modName(first.cause)}`, severe: true};
+    if (first?.kind === 'game') return {text: `made for Minecraft ${first.cause}`, severe: true};
     const severe = caused.filter(p => p.severe).length;
     if (severe) return {text: `breaks ${severe} ${plural(severe, 'mod', 'mods')}`, severe: true};
     if (caused.length) return {text: `may break ${caused.length} ${plural(caused.length, 'mod', 'mods')}`, severe: false};
@@ -376,6 +378,7 @@ function problemsHTML(m: resolve.Mod): string {
             if (p.kind === 'api') return [`Uses ${listed(p.details)}, which ${modName(p.cause)} does not have.`, p.severe, ''];
             if (p.kind === 'jvmdg') return [p.cause ? `Needs ${listed(p.details)}, which ${p.cause} does not have.` : 'Needs the JvmDowngrader runtime, which no mod in the modpack provides.', true, ''];
             if (p.kind === 'duplicate') return [`The same mod (${p.details[0]}) as ${modName(p.cause)}. Forge will not start with both.`, true, ''];
+            if (p.kind === 'game') return [`Made for Minecraft ${p.cause}, not ${p.details[0]}.`, true, ''];
             return [`Requires ${p.cause}, which is not in the modpack.`, true, offerHTML(p.cause)];
         }),
         ...caused.map((p): [string, boolean, string] => [`${modName(p.jar)} uses ${listed(p.details)}, which this version does not have.`, p.severe, '']),
@@ -1201,9 +1204,10 @@ function inspectorHTML(): string {
             ${line('sk', '–', 'm', 'skipped')}
             ${line('cur', '=', 'm', 'current')}
         </ul>
-        ${state.serverBehind ? `<div class="m3-last${state.serverEnter ? ' is-enter' : ''}">
+        ${state.serverBehind || state.serverDiffers ? `<div class="m3-last${state.serverEnter ? ' is-enter' : ''}">
             <span class="m3-eyebrow">Server</span>
-            <p class="m3-reason"><span class="m3-num" data-count="server">${state.serverBehind}</span> ${plural(state.serverBehind, 'mod', 'mods')} behind the pack</p>
+            ${state.serverBehind ? `<p class="m3-reason"><span class="m3-num" data-count="server">${state.serverBehind}</span> ${plural(state.serverBehind, 'mod', 'mods')} behind the pack</p>` : ''}
+            ${state.serverDiffers ? `<p class="m3-reason"><span class="m3-num" data-count="server-differs">${state.serverDiffers}</span> ${plural(state.serverDiffers, 'mod differs', 'mods differ')} from the pack</p>` : ''}
             <a href="#" class="m3-file${state.syncing ? ' is-busy' : busyOps() ? ' is-off' : ''}" id="sync-server">${state.syncing ? 'Syncing…' : 'Sync'}</a>
         </div>` : ''}
         </div>
@@ -1573,13 +1577,15 @@ async function runUndo(ids: string[], mods: string[]) {
 }
 
 async function refreshServer() {
-    const behind = await ServerBehind().catch(() => 0);
-    if (behind === state.serverBehind) return;
-    if (!state.serverBehind) {
+    const {behind, differs} = await ServerBehind().catch(() => ({behind: 0, differs: 0}));
+    if (behind === state.serverBehind && differs === state.serverDiffers) return;
+    if (!state.serverBehind && !state.serverDiffers) {
         shown.set('server', 0);
+        shown.set('server-differs', 0);
         state.serverEnter = true;
     }
     state.serverBehind = behind;
+    state.serverDiffers = differs;
     if (state.mode === 'ready' && !state.selId && !state.settingsOpen) renderInspector();
     state.serverEnter = false;
 }
@@ -1599,7 +1605,7 @@ async function runSync() {
     }
     state.syncing = false;
     state.lastUpdate = await LastUpdate().catch(() => null);
-    state.serverBehind = await ServerBehind().catch(() => 0);
+    ({behind: state.serverBehind, differs: state.serverDiffers} = await ServerBehind().catch(() => ({behind: 0, differs: 0})));
     render();
 }
 

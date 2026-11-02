@@ -2,7 +2,6 @@ package resolve
 
 import (
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -90,26 +89,69 @@ func sameVersion(a, b, mcVersion string) bool {
 	return x != "" && x == y
 }
 
-var dotted = regexp.MustCompile(`^v?(\d+(?:\.\d+)*)$`)
+var versionPart = regexp.MustCompile(`\d+|[a-z]+`)
+
+var preRelease = map[string]int{"dev": 1, "snapshot": 1, "alpha": 2, "beta": 3, "pre": 4, "rc": 5}
+
+func versionParts(fileName, mcVersion string) []string {
+	return versionPart.FindAllString(strings.TrimPrefix(strings.ToLower(FileVersion(fileName, mcVersion)), "v"), -1)
+}
+
+func numeric(s string) bool {
+	return s[0] >= '0' && s[0] <= '9'
+}
+
+func CompareVersions(a, b, mcVersion string) (int, bool) {
+	x, y := versionParts(a, mcVersion), versionParts(b, mcVersion)
+	if len(x) == 0 || len(y) == 0 {
+		return 0, false
+	}
+	for i := 0; i < len(x) && i < len(y); i++ {
+		p, q := x[i], y[i]
+		switch {
+		case numeric(p) && numeric(q):
+			p, q = strings.TrimLeft(p, "0"), strings.TrimLeft(q, "0")
+			if len(p) != len(q) {
+				return cmpInt(len(p), len(q)), true
+			}
+			if p != q {
+				return strings.Compare(p, q), true
+			}
+		case p == q:
+		case preRelease[p] > 0 && preRelease[q] > 0:
+			return cmpInt(preRelease[p], preRelease[q]), true
+		default:
+			return 0, false
+		}
+	}
+	switch {
+	case len(x) == len(y):
+		return 0, true
+	case len(x) > len(y):
+		return tailOrder(x[len(y)]), true
+	default:
+		return -tailOrder(y[len(x)]), true
+	}
+}
+
+func tailOrder(next string) int {
+	if preRelease[next] > 0 {
+		return -1
+	}
+	return 1
+}
+
+func cmpInt(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
 
 func OlderVersion(candidate, current, mcVersion string) bool {
-	a := dotted.FindStringSubmatch(strings.ToLower(FileVersion(candidate, mcVersion)))
-	b := dotted.FindStringSubmatch(strings.ToLower(FileVersion(current, mcVersion)))
-	if a == nil || b == nil {
-		return false
-	}
-	x, y := strings.Split(a[1], "."), strings.Split(b[1], ".")
-	for i := 0; i < len(x) || i < len(y); i++ {
-		var p, q int
-		if i < len(x) {
-			p, _ = strconv.Atoi(x[i])
-		}
-		if i < len(y) {
-			q, _ = strconv.Atoi(y[i])
-		}
-		if p != q {
-			return p < q
-		}
-	}
-	return false
+	c, ok := CompareVersions(candidate, current, mcVersion)
+	return ok && c < 0
 }

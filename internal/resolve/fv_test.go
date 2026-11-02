@@ -52,7 +52,28 @@ func TestOlderVersion(t *testing.T) {
 		t.Error("2.0.10 is newer than 2.0.9")
 	}
 	if OlderVersion("Mantle-1.7.10-0.3.2b.jar", "Mantle-1.7.10-0.3.2.jar", "1.7.10") {
-		t.Error("non-numeric versions are not compared")
+		t.Error("0.3.2b is newer than 0.3.2")
+	}
+	for _, c := range [][2]string{
+		{"appliedenergistics2-rv3-beta-926-GTNH.jar", "appliedenergistics2-rv3-beta-1096-GTNH.jar"},
+		{"HBM-NTM-[1.0.27_X5687].jar", "HBM-NTM-.1.0.27_X5863.jar"},
+		{"PackagedAuto-1.7.10-W.0.2.8.jar", "PackagedAuto-1.7.10-W.0.2.9.jar"},
+		{"Mantle-1.7.10-0.3.2.jar", "Mantle-1.7.10-0.3.2b.jar"},
+		{"ae2_auto_pattern_upload-1.1.3.jar", "ae2_auto_pattern_upload-2.0.0-GTNH_290.jar"},
+		{"Mod-1.7.10-2.0-beta1.jar", "Mod-1.7.10-2.0.jar"},
+		{"Mod-1.7.10-2.0-beta2.jar", "Mod-1.7.10-2.0-rc1.jar"},
+	} {
+		if !OlderVersion(c[0], c[1], "1.7.10") || OlderVersion(c[1], c[0], "1.7.10") {
+			t.Errorf("%s must be older than %s", c[0], c[1])
+		}
+	}
+	for _, c := range [][2]string{
+		{"Mod-1.7.10-build-a.jar", "Mod-1.7.10-build-b.jar"},
+		{"Mod-1.7.10-r12.jar", "Mod-1.7.10-12.jar"},
+	} {
+		if _, ok := CompareVersions(c[0], c[1], "1.7.10"); ok {
+			t.Errorf("%s and %s must not be comparable", c[0], c[1])
+		}
 	}
 }
 

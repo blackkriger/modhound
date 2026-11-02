@@ -60,7 +60,7 @@ export function SaveSettings(arg1:string,arg2:string,arg3:boolean,arg4:string,ar
 
 export function SelectPack(arg1:string):Promise<void>;
 
-export function ServerBehind():Promise<number>;
+export function ServerBehind():Promise<main.ServerStatus>;
 
 export function SetConsoleOpen(arg1:boolean):Promise<void>;
 

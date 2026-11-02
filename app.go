@@ -741,6 +741,7 @@ func (a *App) compatProblems(ctx context.Context, pack *resolve.Pack) []compat.P
 	}
 	var failed atomic.Bool
 	env := a.compatEnv(ctx, pack.Root, &failed)
+	env.MCVersion = pack.MCVersion
 	if lwjgl != nil {
 		if pl, err := compat.LoadPlatform(lwjgl, cacheDir); err == nil {
 			env.Platform = pl
@@ -1288,6 +1289,9 @@ func compatLoad(inputs []compatInput, cacheDir string) []compat.Jar {
 			jars[i] = compat.Jar{Name: in.name, Path: in.path, Index: x}
 			if in.jar != nil {
 				jars[i].ModIDs, jars[i].Requires = in.jar.ModIDs, in.jar.Requires
+				if in.jar.Info != nil {
+					jars[i].MCVersion = in.jar.Info.MCVersion
+				}
 			}
 		})
 	}
@@ -1661,19 +1665,32 @@ func (a *App) syncServer(ctx context.Context, client []server.Mod, mcVersion str
 	return out
 }
 
-func (a *App) ServerBehind() (int, error) {
+type ServerStatus struct {
+	Behind  int `json:"behind"`
+	Differs int `json:"differs"`
+}
+
+func (a *App) ServerBehind() (ServerStatus, error) {
 	a.mu.Lock()
 	pack := a.pack
 	a.mu.Unlock()
 	root := a.serverRoot()
 	if pack == nil || root == "" {
-		return 0, nil
+		return ServerStatus{}, nil
 	}
 	diff, err := server.Compare(server.Snapshot(pack), pack.MCVersion, root)
 	if err != nil {
-		return 0, err
+		return ServerStatus{}, err
 	}
-	return len(diff.Items), nil
+	var out ServerStatus
+	for _, it := range diff.Items {
+		if it.Differs {
+			out.Differs++
+		} else {
+			out.Behind++
+		}
+	}
+	return out, nil
 }
 
 func (a *App) SyncServer() (*ServerSync, error) {

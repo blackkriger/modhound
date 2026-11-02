@@ -556,6 +556,20 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class ServerStatus {
+	    behind: number;
+	    differs: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServerStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.behind = source["behind"];
+	        this.differs = source["differs"];
+	    }
+	}
 	
 	export class Settings {
 	    curseforgeKey: string;

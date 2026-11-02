@@ -140,3 +140,19 @@ func TestDuplicateMods(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestGameVersionMismatch(t *testing.T) {
+	var jars []Jar
+	for name, v := range map[string]string{"a.jar": "1.12.2", "b.jar": "1.7.10", "c.jar": "1.7.x", "d.jar": "${mcversion}", "e.jar": "1.2.DEV", "f.jar": "", "g.jar": "[1.7.10]"} {
+		jars = append(jars, Jar{Name: name, Index: &Index{Classes: map[string]*Class{}, Deps: map[string][]string{}}, MCVersion: v})
+	}
+	var got []string
+	for _, p := range Check(jars, Env{MCVersion: "1.7.10"}) {
+		if p.Kind == KindGame {
+			got = append(got, p.Jar+" "+p.Cause)
+		}
+	}
+	if want := []string{"a.jar 1.12.2"}; !slices.Equal(got, want) {
+		t.Fatalf("game problems = %v, want %v", got, want)
+	}
+}

@@ -2,6 +2,7 @@ package compat
 
 import (
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -15,6 +16,7 @@ const (
 	KindJvmdg     Kind = "jvmdg"
 	KindMissing   Kind = "missing"
 	KindDuplicate Kind = "duplicate"
+	KindGame      Kind = "game"
 )
 
 type Problem struct {
@@ -26,16 +28,18 @@ type Problem struct {
 }
 
 type Jar struct {
-	Name     string
-	Path     string
-	Index    *Index
-	ModIDs   []string
-	Requires []string
+	Name      string
+	Path      string
+	Index     *Index
+	ModIDs    []string
+	Requires  []string
+	MCVersion string
 }
 
 type Env struct {
 	JvmdgClasses func(version string) (map[string]bool, error)
 	Platform     *Platform
+	MCVersion    string
 }
 
 const jvmdgArtifact = "xyz.wagyourtail.jvmdowngrader:jvmdowngrader-java-api"
@@ -284,6 +288,28 @@ func (p *pack) duplicateProblems(add func(Problem)) {
 	}
 }
 
+var gameVersion = regexp.MustCompile(`^1\.(\d+)(?:\.(?:\d+|x))?$`)
+
+func gameMinor(v string) string {
+	m := gameVersion.FindStringSubmatch(strings.Trim(strings.ToLower(strings.TrimSpace(v)), "[]"))
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+func (p *pack) gameProblems(env Env, add func(Problem)) {
+	want := gameMinor(env.MCVersion)
+	if want == "" {
+		return
+	}
+	for _, j := range p.jars {
+		if got := gameMinor(j.MCVersion); got != "" && got != want {
+			add(Problem{Jar: j.Name, Kind: KindGame, Cause: strings.TrimSpace(j.MCVersion), Details: []string{env.MCVersion}})
+		}
+	}
+}
+
 func (p *pack) missingProblems(add func(Problem)) {
 	have := map[string]bool{}
 	for _, id := range builtinMods {
@@ -347,6 +373,7 @@ func Check(jars []Jar, env Env) []Problem {
 	p.jvmdgProblems(env, add)
 	p.missingProblems(add)
 	p.duplicateProblems(add)
+	p.gameProblems(env, add)
 	return sorted(out)
 }
 
@@ -478,7 +505,7 @@ func Merge(found, introduced []Problem) []Problem {
 }
 
 func Summary(file string, problems []Problem) string {
-	var broken, missingIn, requires, duplicates []string
+	var broken, missingIn, requires, duplicates, games []string
 	jvmdg := false
 	for _, p := range problems {
 		switch {
@@ -493,9 +520,14 @@ func Summary(file string, problems []Problem) string {
 			requires = append(requires, p.Cause)
 		case p.Kind == KindDuplicate:
 			duplicates = append(duplicates, p.Cause)
+		case p.Kind == KindGame:
+			games = append(games, p.Cause)
 		}
 	}
 	var parts []string
+	if len(games) > 0 {
+		parts = append(parts, "is made for Minecraft "+strings.Join(uniqueSorted(games), ", "))
+	}
 	if len(broken) > 0 {
 		parts = append(parts, "may break "+strings.Join(uniqueSorted(broken), ", "))
 	}

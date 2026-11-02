@@ -53,6 +53,7 @@ type Item struct {
 	Name       string `json:"name"`
 	ClientFile string `json:"clientFile"`
 	ServerFile string `json:"serverFile"`
+	Differs    bool   `json:"differs"`
 
 	clientPath string
 	serverPath string
@@ -112,10 +113,15 @@ func Compare(client []Mod, mcVersion, root string) (*Diff, error) {
 		onServer[resolve.Stem(name)] = true
 		onServer["word:"+firstWord(name)] = true
 		m, ok := byStem[resolve.Stem(name)]
-		if !ok || m.Side == SideClient || strings.EqualFold(name, m.FileName) || !resolve.OlderVersion(name, m.FileName, mcVersion) || !sameMod(f, p, m) {
+		if !ok || m.Side == SideClient || strings.EqualFold(name, m.FileName) {
 			continue
 		}
-		diff.Items = append(diff.Items, Item{Name: m.Name, ClientFile: m.FileName, ServerFile: name, clientPath: m.Path, serverPath: p, key: m.Key})
+		order, comparable := resolve.CompareVersions(name, m.FileName, mcVersion)
+		differs := !comparable && resolve.FileVersion(name, mcVersion) != "" && resolve.FileVersion(m.FileName, mcVersion) != ""
+		if comparable && order >= 0 || !comparable && !differs || !sameMod(f, p, m) {
+			continue
+		}
+		diff.Items = append(diff.Items, Item{Name: m.Name, ClientFile: m.FileName, ServerFile: name, Differs: differs, clientPath: m.Path, serverPath: p, key: m.Key})
 	}
 	var adds []Mod
 	for _, m := range client {
